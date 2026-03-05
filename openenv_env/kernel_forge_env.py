@@ -34,6 +34,15 @@ class KernelForgeObservation(Observation):
     turn: int = 0
     best_reward: float = -1.0
     info: dict[str, Any] = Field(default_factory=dict)
+    # Topology context: graph structure properties for topology-aware optimization
+    graph_properties: dict[str, Any] | None = Field(
+        default=None,
+        description="Graph topology properties (degree dist, density, diameter, etc.)",
+    )
+    topology_type: str | None = Field(
+        default=None,
+        description="Graph topology class: power-law, sparse-islands, dense-regular, etc.",
+    )
 
 
 class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, State]):

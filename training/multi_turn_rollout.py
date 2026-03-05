@@ -13,11 +13,17 @@ from __future__ import annotations
 
 import os
 import re
+import subprocess
+import tempfile
 from typing import Any, Callable
 
 from openenv_env.reward import compute_reward
+from training.curriculum import format_topology_context
 
 MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
+MODAL_EVAL_FUNCTION = os.getenv("KERNELFORGE_MODAL_EVAL_FN", "evaluate_ops6k_kernel")
+LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_LOCAL_COMPILE", "1") == "1"
+TARGET_CUDA_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 
 
 def extract_cuda_code(text: str) -> str:
@@ -34,14 +40,72 @@ def extract_cuda_code(text: str) -> str:
     return ""
 
 
+def _local_compile_check(code: str) -> tuple[bool, str]:
+    """Quick local nvcc syntax check — fails non-compiling kernels before Modal.
+
+    Saves ~$0.001 per failed kernel by avoiding a Modal A100 call.
+    Only checks syntax (no linking, no GPU needed).
+
+    Returns:
+        (passes, error_message)
+    """
+    if not LOCAL_COMPILE_CHECK:
+        return True, ""
+
+    try:
+        with tempfile.NamedTemporaryFile(suffix=".cu", mode="w", delete=False) as f:
+            f.write(code)
+            cu_path = f.name
+
+        obj_path = cu_path.replace(".cu", ".o")
+        proc = subprocess.run(
+            ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-c", cu_path, "-o", obj_path],
+            capture_output=True, text=True, timeout=15,
+        )
+
+        # Cleanup
+        for p in (cu_path, obj_path):
+            try:
+                os.unlink(p)
+            except OSError:
+                pass
+
+        if proc.returncode != 0:
+            return False, proc.stderr[:1000]
+        return True, ""
+    except FileNotFoundError:
+        # nvcc not installed locally — skip check, let Modal handle it
+        return True, ""
+    except subprocess.TimeoutExpired:
+        return False, "Local compile timed out (15s)"
+    except Exception as e:
+        # Don't block on unexpected errors — let Modal try
+        return True, ""
+
+
 def _evaluate_on_modal(
     code: str,
+    task_code: str = "",
     baseline_orig_ms: float | None = None,
     baseline_dg_ms: float | None = None,
 ) -> dict:
-    """Send a single kernel to Modal for compile + verify + benchmark."""
+    """Send a single kernel to Modal for compile + verify + benchmark.
+
+    Uses evaluate_ops6k_kernel for generic PyTorch ops (with task_code),
+    or falls back to evaluate_kernel for WCC-specific evaluation.
+    """
     import modal
 
+    if task_code:
+        eval_fn = modal.Function.from_name(MODAL_APP_NAME, MODAL_EVAL_FUNCTION)
+        return eval_fn.remote({
+            "cuda_code": code,
+            "task_code": task_code,
+            "warmup_iters": 10,
+            "benchmark_runs": 10,
+        })
+
+    # Fallback: WCC-specific evaluation (legacy path)
     eval_fn = modal.Function.from_name(MODAL_APP_NAME, "evaluate_kernel")
     return eval_fn.remote({
         "cuda_code": code,
@@ -134,6 +198,7 @@ def _get_baselines() -> tuple[float | None, float | None]:
 def make_multi_turn_rollout(
     max_turns: int = 5,
     skill_md_gpu: str | None = None,
+    problem_metadata: list[dict] | None = None,
 ) -> Callable:
     """Create a rollout_func for GRPOTrainer with multi-turn kernel refinement.
 
@@ -146,6 +211,9 @@ def make_multi_turn_rollout(
     Args:
         max_turns: Maximum refinement turns per episode (3 for warm-up, 5 for main RL)
         skill_md_gpu: GPU name for SKILL.md context (default: from env var)
+        problem_metadata: Optional list of problem dicts (from curriculum) with graph_properties.
+            When provided, topology context is included in prompts so the model learns
+            structure-aware optimization. Length must match prompts in rollout_func.
     """
     from trl.experimental.openenv import generate_rollout_completions
 
@@ -169,11 +237,16 @@ def make_multi_turn_rollout(
             episode_logprobs: list[float] = []
             best_reward = -1.0
 
-            # Build initial prompt with SKILL.md context
+            # Build initial prompt with SKILL.md context + topology (if available)
+            topology_ctx = ""
+            if problem_metadata and prompt_idx < len(problem_metadata):
+                topology_ctx = format_topology_context(problem_metadata[prompt_idx])
+
             current_prompt = (
                 f"{skill_context}\n\n"
                 f"---\n\n"
-                f"{initial_prompt}\n\n"
+                f"{initial_prompt}\n"
+                f"{topology_ctx}\n\n"
                 f"Write a complete CUDA kernel. Use ```cuda fenced code blocks."
             )
 
@@ -202,14 +275,20 @@ def make_multi_turn_rollout(
                     current_prompt = f"{current_prompt}\n\n{completion_text}\n\n{feedback}"
                     continue
 
-                # Evaluate on Modal
-                try:
-                    result = _evaluate_on_modal(code, baseline_orig, baseline_dg)
-                    reward = _compute_reward_from_result(result)
-                except Exception as e:
-                    print(f"  [Turn {turn + 1}] Modal eval failed: {e}")
+                # Local compile fast-path — fail non-compiling kernels before Modal
+                compiles_locally, compile_err = _local_compile_check(code)
+                if not compiles_locally:
                     reward = -1.0
-                    result = {"compiles": False, "error": str(e)[:200]}
+                    result = {"compiles": False, "error": compile_err[:200]}
+                else:
+                    # Evaluate on Modal (full compile + verify + benchmark)
+                    try:
+                        result = _evaluate_on_modal(code, baseline_orig, baseline_dg)
+                        reward = _compute_reward_from_result(result)
+                    except Exception as e:
+                        print(f"  [Turn {turn + 1}] Modal eval failed: {e}")
+                        reward = -1.0
+                        result = {"compiles": False, "error": str(e)[:200]}
 
                 if reward > best_reward:
                     best_reward = reward

@@ -1,6 +1,9 @@
 """Tests for multi-turn rollout logic (no GPU/Modal needed)."""
 from __future__ import annotations
 
+import math
+import pytest
+
 from training.multi_turn_rollout import (
     extract_cuda_code,
     _format_feedback,
@@ -49,18 +52,22 @@ class TestFormatFeedback:
         assert "edge (3,7)" in feedback
 
     def test_correct_slow(self):
+        """speedup_vs_orig=0.8 → log(0.8) ≈ -0.223 < 0.05 → 'not faster' tip."""
+        reward = math.log(0.8)  # -0.223
         result = {"compiles": True, "correct": True, "runtime_ms": 5.0, "speedup_vs_orig": 0.8, "speedup_vs_dg": 0, "runtime_stats": {"mean": 5.1, "std": 0.2}}
-        feedback = _format_feedback(result, 1.0, 2)
+        feedback = _format_feedback(result, reward, 2)
         assert "CORRECT" in feedback
         assert "5.000ms" in feedback
         assert "not faster" in feedback
 
-    def test_correct_beats_eager(self):
+    def test_correct_modest_speedup(self):
+        """speedup_vs_orig=1.5 → log(1.5) ≈ 0.405 < 0.69 → 'Modest speedup' tip."""
+        reward = math.log(1.5)  # 0.405
         result = {"compiles": True, "correct": True, "runtime_ms": 2.0, "speedup_vs_orig": 1.5, "speedup_vs_dg": 0.9, "runtime_stats": {}}
-        feedback = _format_feedback(result, 2.0, 3)
+        feedback = _format_feedback(result, reward, 3)
         assert "CORRECT" in feedback
-        assert "Beats eager" in feedback
-        assert "torch.compile" in feedback
+        assert "Speedup vs eager: 1.50x" in feedback
+        assert "Modest speedup" in feedback
 
 
 class TestComputeReward:
@@ -70,14 +77,17 @@ class TestComputeReward:
     def test_verify_fail(self):
         assert _compute_reward_from_result({"compiles": True, "correct": False}) == -1.0
 
-    def test_correct_no_speedup(self):
+    def test_correct_slower(self):
+        """speedup_vs_orig=0.9 → log(0.9) ≈ -0.105"""
         r = _compute_reward_from_result({"compiles": True, "correct": True, "speedup_vs_orig": 0.9, "speedup_vs_dg": 0.5})
-        assert r == 1.0
+        assert r == pytest.approx(math.log(0.9), abs=1e-4)
 
-    def test_beats_eager(self):
+    def test_modest_speedup(self):
+        """speedup_vs_orig=1.2 → log(1.2) ≈ 0.182"""
         r = _compute_reward_from_result({"compiles": True, "correct": True, "speedup_vs_orig": 1.2, "speedup_vs_dg": 0.9})
-        assert r == 2.0
+        assert r == pytest.approx(math.log(1.2), abs=1e-4)
 
-    def test_beats_both(self):
-        r = _compute_reward_from_result({"compiles": True, "correct": True, "speedup_vs_orig": 1.2, "speedup_vs_dg": 1.2})
-        assert r == 3.0
+    def test_large_speedup(self):
+        """speedup_vs_orig=3.0 → log(3.0) ≈ 1.099"""
+        r = _compute_reward_from_result({"compiles": True, "correct": True, "speedup_vs_orig": 3.0, "speedup_vs_dg": 1.5})
+        assert r == pytest.approx(math.log(3.0), abs=1e-4)

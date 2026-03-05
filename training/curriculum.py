@@ -107,7 +107,7 @@ def _default_phases() -> list[CurriculumPhase]:
         CurriculumPhase(
             name="arch_specific",
             target_reward=2.0,
-            description="A100-specific optimizations — L2 pinning, cooperative kernels, vectorized loads",
+            description="A100-specific optimizations — graph algorithms + L2 pinning + cooperative kernels",
             problems=[
                 {
                     "prompt": f"Write a CUDA WCC (Weakly Connected Components) kernel for {TARGET_GPU} ({TARGET_ARCH}) "
@@ -133,12 +133,95 @@ def _default_phases() -> list[CurriculumPhase]:
                     "ops": ["attention"],
                     "difficulty": 3,
                 },
+                # --- Topology-aware graph problems from doubleGraph ---
+                {
+                    "prompt": f"Write a BFS kernel for {TARGET_GPU} ({TARGET_ARCH}). The target is a "
+                              "power-law web graph (HiBench-class, skewed degree distribution with hub vertices). "
+                              "Standard per-vertex parallelism causes warp divergence on hubs. Implement "
+                              "direction-optimizing traversal with bitmap frontier to switch between top-down "
+                              "(queue-based for sparse frontiers) and bottom-up (bitmap scan for dense frontiers). "
+                              "Use `--use_fast_math` and `__ldg()` for read-only graph data.",
+                    "ops": ["bfs"],
+                    "difficulty": 3,
+                    "topology": "power-law",
+                    "data_source": "doublegraph_a100",
+                    "graph_properties": {
+                        "type": "power-law",
+                        "num_vertices": 10000,
+                        "num_edges": 62000,
+                        "avg_degree": 12.4,
+                        "max_degree": 4891,
+                        "density": 0.0012,
+                        "diameter": 8,
+                        "degree_distribution": "heavy-tail, exponent ~2.1",
+                        "optimization_hints": [
+                            "Hub vertices (degree>100) dominate traversal — warp-level processing for hubs",
+                            "Long-tail low-degree vertices (degree<5, ~60% of graph) — thread-per-vertex",
+                            "Frontier size varies 100x between BFS levels — direction-optimizing switch",
+                            "CSR row_ptr access is sequential; col_idx is random → __ldg() for col_idx",
+                        ],
+                    },
+                },
+                {
+                    "prompt": f"Write a PageRank kernel for {TARGET_GPU} ({TARGET_ARCH}). Target: email network "
+                              "(dense, hierarchical, ~25K edges). Implement SpMV + sum-reduce with pinned memory "
+                              "convergence check via `cudaHostAlloc` + `cudaHostGetDevicePointer` for zero-copy "
+                              "convergence flag. Use float32 with `--use_fast_math`. The kernel should converge "
+                              "within epsilon=1e-6 without a `cudaMemcpy` per iteration.",
+                    "ops": ["pagerank"],
+                    "difficulty": 3,
+                    "topology": "dense-regular",
+                    "data_source": "doublegraph_a100",
+                    "graph_properties": {
+                        "type": "dense-regular",
+                        "num_vertices": 1005,
+                        "num_edges": 25571,
+                        "avg_degree": 25.4,
+                        "max_degree": 71,
+                        "density": 0.0253,
+                        "diameter": 5,
+                        "degree_distribution": "near-uniform, slight hierarchy (email org structure)",
+                        "optimization_hints": [
+                            "Uniform degree → balanced warp workload, no hub/leaf divergence",
+                            "Dense rows (avg 25 neighbors) → vectorized float4 loads for SpMV",
+                            "Small graph fits in L2 cache (40MB on A100) — pin adjacency in L2",
+                            "Convergence check via zero-copy avoids cudaMemcpy per iteration",
+                        ],
+                    },
+                },
+                {
+                    "prompt": f"Write a WCC kernel for {TARGET_GPU} ({TARGET_ARCH}) targeting sparse, disconnected "
+                              "networks (netscience-class, ~1.5K vertices, many isolated components). Use "
+                              "non-atomic path-halving Union-Find: `p = parent[parent[p]]` without atomics. "
+                              "Convergence via zero-copy flag. Include sampled hooking (k=2 neighbors first) "
+                              "then full scan. Compile with `--use_fast_math --extra-device-vectorization`.",
+                    "ops": ["wcc"],
+                    "difficulty": 3,
+                    "topology": "sparse-islands",
+                    "data_source": "doublegraph_a100",
+                    "graph_properties": {
+                        "type": "sparse-islands",
+                        "num_vertices": 1589,
+                        "num_edges": 2742,
+                        "avg_degree": 3.45,
+                        "max_degree": 34,
+                        "density": 0.0022,
+                        "diameter": 17,
+                        "degree_distribution": "sparse with isolated clusters, many degree-1 vertices",
+                        "optimization_hints": [
+                            "Many isolated components → early termination when convergence flag is set",
+                            "Low degree → thread-per-vertex dispatch (no warp-level needed)",
+                            "Sparse random access → __ldg() for read-only parent array",
+                            "Small working set → fits entirely in L2, pin parent[] array",
+                        ],
+                    },
+                },
             ],
         ),
         CurriculumPhase(
             name="advanced",
             target_reward=3.0,
-            description="Multi-op fusion and complex memory patterns — beat torch.compile",
+            description="Multi-op fusion, complex graph kernels — beat torch.compile and cuGraph",
             problems=[
                 {
                     "prompt": f"Write a fused CUDA kernel for LayerNorm + GELU + Linear for {TARGET_GPU} ({TARGET_ARCH}). "
@@ -158,9 +241,121 @@ def _default_phases() -> list[CurriculumPhase]:
                     "ops": ["batched_spmv"],
                     "difficulty": 4,
                 },
+                # --- Advanced graph problems from doubleGraph ---
+                {
+                    "prompt": f"Write a triangle counting kernel for {TARGET_GPU} ({TARGET_ARCH}). Target: social "
+                              "network with community clustering. Use set intersection via sorted merge with "
+                              "warp-level binary search. Each warp handles one vertex's neighbor list intersection. "
+                              "Compile with `--use_fast_math --maxrregcount=64` to balance register pressure. "
+                              "Expected: warp-cooperative processing for high-degree vertices.",
+                    "ops": ["triangle_count"],
+                    "difficulty": 4,
+                    "topology": "dense-community",
+                    "data_source": "doublegraph_a100",
+                    "graph_properties": {
+                        "type": "dense-community",
+                        "num_vertices": 4039,
+                        "num_edges": 88234,
+                        "avg_degree": 43.7,
+                        "max_degree": 1045,
+                        "density": 0.0108,
+                        "diameter": 8,
+                        "clustering_coefficient": 0.6055,
+                        "degree_distribution": "community-structured with high-degree hubs per community",
+                        "optimization_hints": [
+                            "High clustering → many triangles per vertex, O(d^2) work for hubs",
+                            "Sorted neighbor lists enable merge-based set intersection",
+                            "Warp-level binary search: each warp lane checks one candidate",
+                            "Register pressure is bottleneck — cap at 64 regs for occupancy",
+                            "Hub vertices (degree>100) need warp-cooperative processing",
+                        ],
+                    },
+                },
+                {
+                    "prompt": f"Write a Louvain community detection kernel for {TARGET_GPU} ({TARGET_ARCH}). Target: "
+                              "social network with distinct community clustering (Karate/Dolphins-class). The local "
+                              "move phase must use warp-level shared-memory hash tables (128 entries per warp) to "
+                              "accumulate inter-community edge weights. Dispatch: warp-cooperative for degree>=8, "
+                              "thread-per-vertex for sparse. Use `--use_fast_math --maxrregcount=48` to increase "
+                              "occupancy for this latency-bound algorithm.",
+                    "ops": ["louvain"],
+                    "difficulty": 4,
+                    "topology": "dense-community",
+                    "data_source": "doublegraph_a100",
+                    "graph_properties": {
+                        "type": "dense-community",
+                        "num_vertices": 34,
+                        "num_edges": 156,
+                        "avg_degree": 9.2,
+                        "max_degree": 17,
+                        "density": 0.139,
+                        "diameter": 5,
+                        "clustering_coefficient": 0.5706,
+                        "num_communities": 4,
+                        "degree_distribution": "bimodal — core members (degree>12) and periphery (degree<6)",
+                        "optimization_hints": [
+                            "Small graph but algorithm pattern matters for scaling",
+                            "Bimodal degree → dual dispatch: warp-cooperative for degree>=8, thread for rest",
+                            "Shared-memory hash tables (128 entries/warp) for community edge weight accumulation",
+                            "Modularity delta computation is latency-bound → maximize occupancy via low reg count",
+                            "4 ground-truth communities — convergence in 2-3 Louvain passes",
+                        ],
+                    },
+                },
             ],
         ),
     ]
+
+
+def format_topology_context(problem: dict) -> str:
+    """Format graph topology properties as text context for the model.
+
+    When a curriculum problem includes graph_properties, this produces a
+    structured context block that teaches the model WHY certain CUDA patterns
+    are optimal for the given topology. This is the key RL signal that makes
+    topology-aware optimization possible — the model sees graph structure, not
+    just text descriptions.
+
+    Returns empty string for non-topology problems (phases 0-1, generic ops).
+    """
+    props = problem.get("graph_properties")
+    if not props:
+        return ""
+
+    lines = [
+        "\n## Graph Topology Context",
+        f"Type: {props.get('type', 'unknown')}",
+        f"Vertices: {props.get('num_vertices', '?'):,} | Edges: {props.get('num_edges', '?'):,}",
+        f"Avg degree: {props.get('avg_degree', '?')} | Max degree: {props.get('max_degree', '?')}",
+        f"Density: {props.get('density', '?')} | Diameter: {props.get('diameter', '?')}",
+        f"Distribution: {props.get('degree_distribution', 'unknown')}",
+    ]
+
+    if props.get("clustering_coefficient"):
+        lines.append(f"Clustering coefficient: {props['clustering_coefficient']}")
+    if props.get("num_communities"):
+        lines.append(f"Communities: {props['num_communities']}")
+
+    hints = props.get("optimization_hints", [])
+    if hints:
+        lines.append("\nOptimization guidance (from A100 expert kernels):")
+        for hint in hints:
+            lines.append(f"  - {hint}")
+
+    return "\n".join(lines)
+
+
+def format_problem_prompt(problem: dict) -> str:
+    """Build a complete prompt from a curriculum problem dict.
+
+    Combines the base prompt with topology context (if available).
+    Use this instead of raw problem["prompt"] to get topology-aware prompts.
+    """
+    base = problem.get("prompt", "")
+    topo_ctx = format_topology_context(problem)
+    if topo_ctx:
+        return f"{base}\n{topo_ctx}"
+    return base
 
 
 class CurriculumManager:
