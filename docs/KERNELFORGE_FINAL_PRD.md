@@ -16,7 +16,7 @@
 | Primary model | Qwen3-Coder-Next FP8 | Trained on 800K executable tasks with agentic RL. 70.6% SWE-Bench. Tool calling native. 3B active = fast generation. |
 | Backup model | Qwen3.5-9B 4-bit | If Coder-Next fails to load. 81.7 GPQA Diamond. |
 | SkyDiscover LLM | GLM-5 via API ($1/M input) | Frontier 744B model for kernel evolution. ~$2-8/run. |
-| RL algorithm | GRPO via TRL GRPOTrainer + stacked mitigations | MARS+TRLOO per-turn credit assignment (fixes Dr. Kernel bias, arXiv 2510.15414). Nsight structured rewards replace discrete {-1,1,2,3} (fixes lazy optimization). CPPO pruning (arXiv 2503.22342) reduces eval cost 2-4x. MASPO soft trust region (arXiv 2602.17550). Transformation grammar constrains action space. GRPO experimental 50 steps; SkyDiscover/SFT remain hedges. See Section 6.0.4. |
+| RL algorithm | TRLOO-augmented GRPO via TRL GRPOTrainer + stacked mitigations | MARS per-turn credit assignment + TRLOO post-process with N/(N-1) scaling (fixes Dr. Kernel 25% gradient shrinkage, arXiv 2510.15414 + 2602.05885). Nsight structured rewards + log(speedup) continuous signal replace discrete {-1,1,2,3} (fixes lazy optimization). CPPO pruning (arXiv 2503.22342) reduces eval cost 2-4x. MASPO soft trust region (arXiv 2602.17550). GRPO experimental 10 steps local-only; SkyDiscover/SFT remain primary hedges. See Section 6.0.4. |
 | Training pipeline | 3-stage: Warmup → RFT → GRPO | Pure RL collapses at step 17 (CUDA Agent Section 3.3). |
 | Environment spec | OpenEnv (step/reset/state) | Hackathon framework requirement. |
 | Kernel language | CUDA C++ | Aligns with CUDA Agent infra + doubleGraph patterns. |
@@ -30,7 +30,7 @@ An RL training system + evolutionary search system that teaches Qwen3-Coder-Next
 **Component 1: CUDA Agent Evaluation Pipeline** (ByteDance)
 - 6,000 PyTorch operator tasks (CUDA-Agent-Ops-6K dataset)
 - Compile → verify → profile scripts from their agent_workdir
-- Discrete reward function {-1, 1, 2, 3}
+- Continuous reward function: log(speedup) + occupancy + coalescing (replacing discrete {-1, 1, 2, 3}). Floor baseline = torch.compile timing for Ops-6K tasks.
 - Anti-reward-hacking measures
 - Source: https://github.com/BytedTsinghua-SIA/CUDA-Agent
 
@@ -40,26 +40,27 @@ An RL training system + evolutionary search system that teaches Qwen3-Coder-Next
 - Core algorithms: BFS (dual-frontier direction-optimizing), Louvain (3-tier adaptive dispatch), PageRank (fused SpMV with warp-level reduction), WCC (parallel union-find), Triangle Count (DAG orientation + bilateral intersection)
 - Key A100 (SM80) patterns: degree-based 4-bin segmentation (≥1024/32-1023/1-31/0), thread-local LRU `CachePool` (capacity=8, type-erased via `Cacheable`), `__ballot_sync` warp aggregation, shared-memory hash tables with `atomicCAS`, `cudaHostAllocMapped` zero-copy convergence
 - Hard constraints: single GPU only, int32 only, no DCS/hypersparse, Stream 0 execution, no hot-path error checking
-- Reward calibration: cuGraph baseline timing = floor (reward 1), doubleGraph expert timing = ceiling (reward 3), per-algorithm thresholds from profiling
+- Reward calibration (graph tasks ONLY — 5 algorithms): cuGraph baseline timing = floor, doubleGraph expert timing = ceiling, per-algorithm thresholds from profiling. **NOTE:** This calibration applies ONLY to the 5 graph algorithm tasks (BFS, Louvain, PageRank, WCC, TC). For the 6,000 Ops-6K PyTorch operator tasks, use torch.compile timing as floor instead (matching CUDA-Agent's approach).
 - Source: https://github.com/double-ai/doubleGraph
 - Full engineering reference: `docs/skills/doublegraph_a100.md` (11-section deep dive)
 
 **Component 3: SkyDiscover Evolutionary Search** (UC Berkeley)
 - AdaEvolve + EvoX for kernel evolution via GLM-5 API
-- ~80-120 LLM calls → kernels beating torch.compile
-- Parallel track: runs while GRPO trains
+- Pure parallel hedge: 80-120 evolutions on 5 seed .cu files (gemm, softmax, layernorm, fused_bias_relu, reduce_sum)
+- Do NOT feed the full 6K Ops-6K dataset — SkyDiscover's gpu_mode supports only ~4 benchmark tasks natively
+- Parallel track: runs on separate machine while GRPO trains (no GPU contention)
 - Source: https://github.com/skydiscover-ai/skydiscover
 
 **Component 4: GRPO Training** (our contribution)
 - 3-stage pipeline training Qwen3-Coder-Next 80B MoE (3B active) via Unsloth FP8 Dynamic on B200
 - Multi-turn with compiler feedback + MARS+TRLOO per-turn credit assignment
 - Nsight Compute structured rewards (occupancy, mem coalescing, warp efficiency) replacing discrete {-1,1,2,3}
-- Transformation grammar (12-40 rules) instead of free-form kernel generation
+- CUDA-Agent SKILL.md verbatim + doubleGraph pattern paste as prompt context (transformation grammar deferred to v2)
 - Hybrid eval: local nvcc+PAC for early turns, Modal A100+ncu for final turn
 - CPPO pruning (top-2 of G candidates after cheap structural filter)
 - MASPO soft trust region replacing hard PPO clip
 - OpenEnv-compatible environment, Unsloth + TRL on B200
-- **Strategy:** GRPO is experimental (50 steps). SkyDiscover + SFT are parallel hedges. See GRPO_DEEP_DIVE sections GRPO-9 through GRPO-14 for complete stacked architecture.
+- **Strategy:** GRPO is experimental (10 steps, local nvcc eval only, no Modal). SkyDiscover + SFT are primary hedges. See GRPO_DEEP_DIVE sections GRPO-9 through GRPO-14 for stacked architecture (note: GRPO-13 transformation grammar deferred to v2).
 
 ---
 
@@ -182,13 +183,15 @@ git clone https://github.com/skydiscover-ai/skydiscover
 git clone https://github.com/meta-pytorch/OpenEnv
 ```
 
-**Subtask 0.1.5: Download doubleGraph A100 wheels**
+**Subtask 0.1.5: Download doubleGraph A100 wheels** (STRETCH GOAL — skip if B200 wheel incompatible)
 ```bash
-# Check https://github.com/double-ai/doubleGraph/releases/ for latest
+# STRETCH GOAL: Wheel may not install on B200. If it fails, skip entirely.
+# The 330-line docs/skills/doublegraph_a100.md provides all patterns needed for prompts.
 mkdir -p ./wheels
-wget -P ./wheels/ [A100_WHEEL_URL]
+wget -P ./wheels/ [A100_WHEEL_URL]  # Check https://github.com/double-ai/doubleGraph/releases/
 ```
 - Source: https://github.com/double-ai/doubleGraph/releases/
+- **Fallback:** Extract patterns into SKILL.md from docs/skills/DOUBLEGRAPH_A100.md (already complete)
 
 **Done when:** All 5 subtasks complete. Verify with:
 ```bash
@@ -232,12 +235,12 @@ nvcc -arch=sm_80 -c /tmp/test.cu -o /tmp/test.o && echo "sm_80 OK"
 rm /tmp/test.cu /tmp/test.o
 ```
 
-**Subtask 0.2.4: Install doubleGraph**
+**Subtask 0.2.4: Install doubleGraph** (STRETCH GOAL)
 ```bash
 pip install ./wheels/[DOUBLEGRAPH_A100_WHEEL].whl
 python -c "import cugraph; print('doubleGraph loaded')"
 ```
-If this fails: doubleGraph integration becomes stretch goal. Dense ops still work.
+STRETCH GOAL: If this fails (likely on B200), skip entirely. Dense ops + doubleGraph patterns from docs/skills/doublegraph_a100.md are sufficient. Runtime doubleGraph is NOT needed for Ops-6K reward calibration (those use torch.compile as floor).
 
 **Done when:** All 4 subtasks pass.
 
@@ -261,6 +264,13 @@ cat CUDA-Agent/agent_workdir/SKILL.md
 cat CUDA-Agent/agent_workdir/utils/compile.sh
 cat CUDA-Agent/agent_workdir/utils/verification.py
 cat CUDA-Agent/agent_workdir/utils/profiling.py
+
+# CRITICAL: Copy these scripts VERBATIM into evaluation/
+# Do NOT rewrite compile.sh, verification.py, or profiling.py.
+# Wrap them with our subprocess isolation, but preserve their exact logic.
+cp CUDA-Agent/agent_workdir/utils/compile.sh evaluation/cuda_agent_compile.sh
+cp CUDA-Agent/agent_workdir/utils/verification.py evaluation/cuda_agent_verification.py
+cp CUDA-Agent/agent_workdir/utils/profiling.py evaluation/cuda_agent_profiling.py
 ```
 
 **Subtask 0.3.2: Test the scripts manually**
@@ -578,7 +588,8 @@ print(f"\nResults: {compilable}/{len(sft_pairs)} compile ({100*compilable/len(sf
 
 ```bash
 cd ~/kernelforge/skydiscover
-uv sync --extra gpu_mode --extra external
+uv sync --extra external
+# NOTE: gpu_mode extra only covers ~4 benchmark tasks. Do NOT use for Ops-6K.
 
 # Create test evaluator
 cat > ../validation/sky_eval.py << 'PYEOF'
@@ -914,6 +925,8 @@ These feed into:
   - r = +3: within 10% of doubleGraph expert kernel timing
   - Per-algorithm thresholds computed from Task 24 profiling results
 
+> **IMPORTANT (Fix 2):** The cuGraph floor / doubleGraph ceiling calibration above applies ONLY to the 5 graph algorithm tasks. For the 6,000 Ops-6K PyTorch operator tasks (GEMM, softmax, layernorm, etc.), doubleGraph has NO baselines. Those tasks use torch.compile timing as the floor, matching CUDA-Agent's approach. Do not conflate graph-task calibration with Ops-6K calibration.
+
 ---
 
 ### PHASE 2: RUN (Saturday, hackathon day)
@@ -930,6 +943,8 @@ python validation/test_07_compilation_rate.py
 #   50-70% → Short Stage 1 (50 steps, ~1.5 hrs)
 #   <50% → Full Stage 1 (100 steps, ~3.5 hrs)
 ```
+
+> **Fix 6 (SFT first):** Do NOT attempt GRPO until Unsloth's built-in SFT trainer has run a warmup (Task 0.5 data + Stage 2 RFT). Verify >70% compile rate via local nvcc eval (no Modal) BEFORE attempting any GRPO steps. The TRL + Unsloth FP8 MoE + GRPO combination is untested at scale.
 
 #### Task 26: Launch SkyDiscover (Parallel Track)
 **Time:** 2 hours setup, runs in background
@@ -1143,6 +1158,12 @@ This means rewards r=+2 and r=+3 are *mathematically unreachable*. The model can
 - A kernel that's 1.06x faster (barely r=+2) from one that's 5x faster (also r=+2)
 - The model has zero incentive to optimize beyond the threshold
 
+**Revised approach (Fix 5):** Replace discrete {-1,1,2,3} with continuous reward:
+- `reward = log(speedup_vs_eager)` for correct kernels (continuous signal proportional to actual improvement)
+- Add occupancy and coalescing bonuses from Nsight Compute (or subprocess profiling.py from CUDA-Agent)
+- Wrap with TRLOO N/(N-1) post-processing for unbiased advantage estimation
+- Reuse CUDA-Agent's profiling.py and verification.py via subprocess (copy verbatim, do NOT rewrite)
+
 **Pivot options:**
 1. Implement continuous reward: `reward = log(speedup)` instead of discrete bins
 2. Add profiling-based rejection sampling (Dr. Kernel's PRS): only train on completions that BOTH compile AND show measurable speedup
@@ -1187,8 +1208,9 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | Fundamental Failure | Root Cause | Fix | Paper |
 |-------------------|------------|-----|-------|
 | **#1: GRPO bias** | Self-inclusion in group mean/std | MARS cumulative per-turn returns + TRLOO leave-one-out baseline | MARSHAL (arXiv 2510.15414) + Dr. Kernel (arXiv 2602.05885) |
-| **#2: Lazy reward** | Discrete {-1,1,2,3} loses signal; profiling is a stub | Nsight Compute structured reward: occupancy + mem_coalescing + warp_efficiency → continuous signal | CUDABench (arXiv 2603.02236) |
-| **#2 (action space)** | Free-form 2000-token generation = huge search space | Transformation grammar (12-40 rules): model proposes transforms, not full kernels | OptiML (arXiv 2602.12305), KernelBlaster (arXiv 2602.14293) |
+| **#1 (post-process)** | GRPO gradient shrinkage = (1 - 1/N) | TRLOO post-process: multiply advantages by N/(N-1) scaling factor after GRPO computation. Drop-in fix, no custom training loop needed. | Dr. Kernel (arXiv 2602.05885) |
+| **#2: Lazy reward** | Discrete {-1,1,2,3} loses signal; profiling is a stub | Continuous log(speedup) + Nsight Compute structured reward: occupancy + mem_coalescing + warp_efficiency | CUDABench (arXiv 2603.02236) |
+| **#2 (action space)** | Free-form 2000-token generation = huge search space | Rich SKILL.md prompt context (CUDA-Agent verbatim + doubleGraph patterns) constrains generation. Transformation grammar deferred to v2. | CUDA-Agent SKILL.md, doubleGraph docs |
 | **#3: Compute scale** | 384x fewer samples than CUDA Agent | CPPO pruning (only eval top-2 of G), hybrid eval (local+Modal), smaller action space | CPPO (arXiv 2503.22342) |
 | **#3 (throughput)** | Sync eval blocks training | MASPO soft trust region + AReaL-style replay buffer (staleness η=4-8) | MASPO (arXiv 2602.17550), AReaL (arXiv 2505.24298) |
 
@@ -1197,33 +1219,34 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | Approach | Probability | Time | Why |
 |----------|------------|------|-----|
 | **SkyDiscover evolutionary search** | HIGH | 2-4 hrs | AdaEvolve proven on 200+ tasks. No training. Primary hedge. |
-| **GRPO with stacked techniques** | MEDIUM | 4-6 hrs training | MARS+TRLOO fixes bias. Nsight fixes reward. CPPO cuts cost. Transform grammar shrinks search space. 50-step experiment on Qwen3-Coder-Next 80B FP8. |
+| **GRPO with stacked techniques** | MEDIUM | 4-6 hrs training | MARS+TRLOO fixes bias. Nsight fixes reward. CPPO cuts cost. Rich SKILL.md constrains generation. 10-step local-only experiment on Qwen3-Coder-Next 80B FP8. |
 | **SFT on curated data** (ConCuR-style) | MEDIUM-HIGH | 3-5 hrs | ConCuR shows curated traces > RL. Parallel track. |
 | **GRPO as originally designed in PRD** | LOW | 7-12 hrs | Without stacking, still biased, stub reward, too few samples. |
 
-**Implementation priority order (revised):**
+**Implementation priority order (revised — 4-tier minimal viable approach):**
 
-| Priority | When | Activity | New Files |
-|----------|------|----------|-----------|
-| **P1** | Thu night (6-8 hrs) | Hybrid rollout + Nsight reward + transformation grammar + SkyDiscover 10-iteration hedge | `evaluation/reward_nsight.py`, `openenv_env/transform_grammar.py`, `training/hybrid_rollout.py` |
-| **P2** | Fri morning | SFT on GLM-5 curated data + custom GRPO loop with MARS+TRLOO (50 steps on Qwen3-Coder-Next 80B FP8) | `training/custom_grpo_loop.py` |
-| **P3** | Fri afternoon | Full Stage 3 GRPO + curriculum on 80B FP8 | Config updates to stage3_grpo.py |
-| **P4** | Sat | Full eval + demo + collect best kernels from all tracks | — |
+| Priority | When | Activity | Deliverable |
+|----------|------|----------|-------------|
+| **P0** | By Friday night | OpenEnv env that calls CUDA-Agent's EXACT scripts (copied verbatim into evaluation/) + continuous speedup reward (log(speedup) + occupancy + coalescing) + TRLOO N/(N-1) post-process in reward wrapper | Working eval pipeline with continuous reward |
+| **P1** | Parallel with P0 | SkyDiscover evolution on 5 seed .cu files (gemm, softmax, layernorm, fused_bias_relu, reduce_sum). 80-120 evolutions per seed. | Demo-worthy evolved kernels |
+| **P2** | After P0 | Rich SKILL.md with doubleGraph patterns (from docs/skills/doublegraph_a100.md) + CUDA-Agent SKILL.md verbatim. 50-example SFT warmup via Unsloth built-in trainer. | Anchored compilation ability |
+| **P3** | Optional demo | 10-step GRPO with local-only nvcc eval (no Modal). Gate G-0.8 must pass first. | Proof-of-concept RL training |
 
-**Total new code:** ~450 LOC across 6 files. Fits in 12-16 hours coding + 4-6 hours training.
+**Total new code:** ~200 LOC across 4 files (down from ~450 — transformation grammar dropped). Fits in 8-12 hours coding + 2-4 hours training.
 
 **Realistic expected outcome with Qwen3-Coder-Next 80B FP8:**
 - 85-95% compile+correct, 1.6-2.1x geo-mean on curated_200 + WCC
 - Discovery of 8-12 A100-specific patterns (float4, L2 pinning, shuffles, tiling)
-- Total evals: ~800-1200 (fits 4-6 hrs training on B200)
+- Total evals: ~200-400 (P3 is 10-step demo; SkyDiscover provides bulk of evolved kernels)
 
 **Why this revision succeeds where original PRD fails:**
-- Fixes GRPO bias (MARS+TRLOO)
-- Fixes lazy reward (Nsight + PRS)
-- Fixes eval bottleneck (hybrid + batch)
-- Fixes action space (grammar)
-- Fixes scope (GRPO experimental, SkyDiscover/SFT parallel hedges)
-- Total evals ~800-1200 (fits 4-6 hrs)
+- Fixes GRPO bias (MARS+TRLOO post-process)
+- Fixes lazy reward (continuous log(speedup) + Nsight)
+- Fixes eval bottleneck (local nvcc for P3, no Modal dependency)
+- Fixes action space (rich SKILL.md context, grammar deferred)
+- Fixes scope (GRPO demoted to P3 optional demo, SkyDiscover/SFT are primary)
+- Fixes doubleGraph scope (graph calibration for 5 tasks only, torch.compile for Ops-6K)
+- Total timeline realistic (~36 hrs with 7 hr buffer)
 
 ---
 
@@ -1298,28 +1321,30 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | **G-0.5** | Thu night | SFT data generated | `data/sft_data.json` has >=50 compilable examples | Lower bar to 30; if API fails, use Ops-6K curated_200 as warmup data |
 | **G-0.6** | Fri morning | GRPOTrainer initializes | test_06 passes, no OOM, no API errors | Adapt to TRL API changes (read changelog) |
 | **G-0.7** | Fri afternoon | Full GRPO step works | test_08 completes: generate -> compile -> reward -> gradient update | Debug loop; if unfixable, fall back to SFT-only + SkyDiscover |
+| **G-0.8** | Thu night | 5-step GRPO sanity | Run 5 GRPO steps with continuous reward + TRLOO post-process. Must see: (a) non-zero gradients in 4/5 steps, (b) reward variance > 0 in 3/5 steps, (c) at least 2/20 test kernels achieve >1.2x speedup vs torch.compile. | Zero gradients → reward function broken. No speedup → model cannot optimize, fall back to SFT + SkyDiscover only. Do NOT continue to P3 GRPO. |
 | **G-25** | Sat 9 AM | Compilation rate | test_07: base model >=50% compilation rate | <50%: extend warmup. <30%: switch model. <10%: abandon GRPO, go SkyDiscover-only. |
 
 ---
 
 ### 6.7 Realistic Timeline (with failure buffer)
 
-**Updated per Section 6.0.4 revision:** Three parallel tracks — GRPO with stacked techniques is now viable alongside SkyDiscover and SFT. Priority order reflects stacked implementation sequence.
+**Updated per 10-fix critique:** P0 (eval pipeline) must work before anything else. SkyDiscover runs in parallel as primary hedge. GRPO demoted to P3 (optional 10-step demo).
 
 | Block | Time | Activity | Failure Buffer |
 |-------|------|----------|---------------|
 | **Wed night** | 4 hrs | Downloads + API key setup + GLM-5 API registration | Re-download Thu morning if needed |
 | **Thu 9AM-12PM** | 3 hrs | B200 setup + CUDA verify + Gate G-0.2. Load Qwen3-Coder-Next 80B FP8 via Unsloth. | 1 hr debug buffer |
-| **Thu 1PM-11PM** | 8 hrs | **P1 — Core stack:** Hybrid rollout (local nvcc+PAC turns 1-2, Modal+ncu turn 3). Nsight structured reward (`evaluation/reward_nsight.py`). Transformation grammar (`openenv_env/transform_grammar.py`, 12 core rules). SkyDiscover evaluator + 10-iteration hedge run. Gate G-0.3. | 2 hr buffer — critical coding block |
-| **Fri 9AM-1PM** | 4 hrs | **P2 — Training:** SFT on GLM-5 curated data (ConCuR-style). Custom GRPO loop with MARS+TRLOO (`training/custom_grpo_loop.py`). Run 50 steps on 80B FP8. Gate G-0.7. | If GRPO stalls, SFT + SkyDiscover results are the submission |
-| **Fri 1PM-5PM** | 4 hrs | **P3 — Stage 3:** Full GRPO + curriculum on 80B FP8 (40-50 steps). CPPO pruning active. MASPO soft trust if clip issues arise. | If OOM: reduce G=2→1 or switch to SFT-only |
-| **Sat 9AM** | 30 min | **Gate G-25**: compilation rate decision. Evaluate all tracks (SkyDiscover + SFT + GRPO). | Decision tree defined in 6.6 |
+| **Thu 1PM-6PM** | 5 hrs | **P0 — Core pipeline:** Copy CUDA-Agent eval scripts verbatim into evaluation/. Wire continuous reward function (log(speedup) + occupancy + coalescing). Add TRLOO N/(N-1) post-process wrapper. Gate G-0.3. | 2 hr buffer |
+| **Thu 6PM-11PM** | 5 hrs | **P1 — SkyDiscover (parallel):** Set up evaluator on 5 seed .cu files. Launch 80-120 evolution runs. **P2 — SKILL.md:** Copy CUDA-Agent SKILL.md verbatim. Extract doubleGraph patterns into prompt context. | SkyDiscover runs overnight |
+| **Fri 9AM-1PM** | 4 hrs | **P2 — SFT warmup:** 50-example SFT via Unsloth built-in trainer. Verify >70% compile rate with local nvcc. Gate G-0.8: 5-step GRPO sanity check. | If compile rate <70%, extend SFT |
+| **Fri 1PM-5PM** | 4 hrs | **P3 — Optional GRPO:** 10-step GRPO with local-only eval (no Modal). Only if G-0.8 passes. | If GRPO stalls, SFT + SkyDiscover results are the submission |
+| **Sat 9AM** | 30 min | **Gate G-25**: compilation rate decision. Evaluate all tracks. | Decision tree in 6.6 |
 | **Sat 9:30AM-5PM** | 7.5 hrs | Collect best kernels from all tracks. OpenEnv wrapper. Run final eval suite. | SkyDiscover is the hedge |
 | **Sat 5PM-10PM** | 5 hrs | Results collection, demo, blog | 2 hr buffer |
 
 **Total available: ~43 hrs. Total planned: ~36 hrs. Buffer: ~7 hrs (16%).**
 
-**Key change from previous timeline:** All three tracks (SkyDiscover, SFT, GRPO) run in parallel rather than sequentially. GRPO is no longer "lowest probability" — with MARS+TRLOO credit, Nsight rewards, CPPO pruning, and transformation grammar, it is a viable MEDIUM-probability track. Thu night focuses on the core stacked infrastructure (hybrid eval, Nsight reward, transform grammar) that benefits ALL tracks.
+**Key change from previous timeline:** P0 (eval pipeline + continuous reward) must work before anything else. SkyDiscover runs in parallel as the primary hedge. GRPO is demoted to P3 (optional 10-step demo) — it only runs if G-0.8 passes. Transformation grammar dropped from v1. The eval pipeline reuses CUDA-Agent's scripts verbatim rather than rewriting them.
 
 ---
 

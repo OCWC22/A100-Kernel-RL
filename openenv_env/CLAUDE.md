@@ -42,22 +42,23 @@ def step(self, action: KernelForgeAction, timeout_s=None, **kwargs) -> KernelFor
 ## Reward (`reward.py`)
 
 ```python
-def compute_reward(compiled: bool, correct: bool, speedup_vs_eager: float, speedup_vs_compile: float) -> float
+def compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile,
+                   occupancy=None, mem_coalescing=None, warp_efficiency=None) -> float
 ```
 
 | Return | Condition |
 |--------|-----------|
 | -1.0 | not compiled OR not correct |
-| 3.0 | speedup_vs_compile > 1.05 |
-| 2.0 | speedup_vs_eager > 1.05 |
-| 1.0 | correct, no meaningful speedup |
+| log(speedup) + nsight_bonus | correct kernel (continuous signal) |
 
-## Nsight Bonus (NOT YET IMPLEMENTED)
+```python
+def trloo_post_process(advantages: list[float], n: int) -> list[float]
+```
+Scales GRPO advantages by N/(N-1) to correct Dr. Kernel gradient shrinkage.
 
-Planned formula (see GRPO-9, `GRPO_DEEP_DIVE.md` line 1276):
-- Extract ncu metrics: `sm__throughput.avg.pct_of_peak_sustained_elapsed`, `dram__throughput`, etc.
-- Compute continuous bonus [0, 0.5] on top of discrete reward
-- **File to create**: `reward_nsight.py`
+## Nsight Integration
+
+Nsight metrics (occupancy, mem_coalescing, warp_efficiency) are passed as optional kwargs to `compute_reward()`. When available, they add a continuous bonus: `0.4*occ + 0.3*mem + 0.2*warp`.
 
 ## Anti-Hack (`anti_hack.py`)
 
@@ -117,22 +118,14 @@ LRU eviction. Calls `close()` or `release()` on evicted entries.
 
 Entry type: `GPUCacheEntry(key: str, value: Any, metadata: dict)`
 
-## Transform Grammar (NOT YET IMPLEMENTED)
+## Transform Grammar — DEFERRED TO v2
 
-Planned: 12 core + 28 extended transformation rules for CUDA kernel optimization.
-See GRPO-13, `GRPO_DEEP_DIVE.md` line 1490.
+Transformation grammar (12-40 rules) was planned but deferred. No production system has shipped this for CUDA kernels as of March 2026. For v1, use CUDA-Agent's SKILL.md verbatim + doubleGraph pattern paste.
 
-- Parser extracts applicable transforms from kernel source via regex
-- Prompt template injects transform suggestions into LLM context
-- **File to create**: `transform_grammar.py`
-
-## Files to Create
-
-- [ ] `transform_grammar.py` — 40-rule grammar parser + prompt template
-- [ ] `reward_nsight.py` — Nsight Compute bonus reward [0, 0.5]
+See GRPO-13, `GRPO_DEEP_DIVE.md` line 1490 for reference design.
 
 ## Deep Dive Pointers
 
 - Nsight rewards: `GRPO_DEEP_DIVE.md` line 1276 (GRPO-9)
-- Transform grammar: `GRPO_DEEP_DIVE.md` line 1490 (GRPO-13)
+- Transform grammar (deferred): `GRPO_DEEP_DIVE.md` line 1490 (GRPO-13)
 - Reward function spec: `GRPO_DEEP_DIVE.md` line 237 (GRPO-3, Sec 3.2)

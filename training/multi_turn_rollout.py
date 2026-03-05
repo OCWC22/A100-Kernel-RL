@@ -52,12 +52,15 @@ def _evaluate_on_modal(
 
 
 def _compute_reward_from_result(result: dict) -> float:
-    """Compute discrete reward from Modal evaluation result."""
+    """Compute continuous reward from evaluation result."""
     return compute_reward(
         compiled=result.get("compiles", False),
         correct=result.get("correct", False),
         speedup_vs_eager=result.get("speedup_vs_orig", 0),
         speedup_vs_compile=result.get("speedup_vs_dg", 0),
+        occupancy=result.get("occupancy"),
+        mem_coalescing=result.get("mem_coalescing"),
+        warp_efficiency=result.get("warp_efficiency"),
     )
 
 
@@ -93,14 +96,14 @@ def _format_feedback(result: dict, reward: float, turn: int) -> str:
                 f"std={stats.get('std', 0):.3f}ms"
             )
 
-        if reward < 2.0:
+        if reward < 0.05:  # log(1.05) ~ 0.049, i.e. no meaningful speedup
             parts.append(
                 "Kernel is correct but not faster than eager PyTorch. "
                 "Try shared memory tiling, vectorized loads, or kernel fusion."
             )
-        elif reward < 3.0:
+        elif reward < 0.69:  # log(2.0) ~ 0.693, i.e. modest speedup
             parts.append(
-                "Beats eager baseline! Try to also beat torch.compile. "
+                "Modest speedup. Try to push past 2x. "
                 "Consider L2 cache pinning, warp-level primitives, or "
                 "register pressure tuning."
             )
@@ -210,7 +213,7 @@ def make_multi_turn_rollout(
                     best_reward = reward
 
                 # Early exit on perfect score
-                if reward >= 3.0:
+                if reward >= 1.6:  # log(5.0) ~ 1.61, i.e. 5x+ speedup
                     break
 
                 # Last turn — no need for feedback

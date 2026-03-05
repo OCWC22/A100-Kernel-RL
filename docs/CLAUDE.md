@@ -44,7 +44,7 @@
 | GRPO-10 | 1355 | Hybrid Eval (Local + Modal) |
 | GRPO-11 | 1403 | CPPO Completion Pruning |
 | GRPO-12 | 1446 | MASPO Soft Trust Region |
-| GRPO-13 | 1490 | Transformation Grammar (40 Rules) |
+| GRPO-13 | 1490 | Transformation Grammar (40 Rules) — DEFERRED TO v2 |
 | GRPO-14 | 1617 | Full Stacked Architecture (Single-GPU Hackathon) |
 
 ---
@@ -60,9 +60,9 @@
 | **Type** | GRPO warm-up | RFT (SFT on filtered) | GRPO + curriculum |
 | **LR** | 3e-6 | 5e-6 | 5e-6 |
 | **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
-| **G (generations)** | 4 | — | 4 |
-| **Max turns** | 3 | — | 5 |
-| **Steps/Epochs** | 300 steps | 3 epochs | 200 steps |
+| **G (generations)** | 4 | — | 2 |
+| **Max turns** | 3 | — | 3 |
+| **Steps/Epochs** | 300 steps | 3 epochs | 10 steps (P3 demo) |
 | **Batch** | 1 x 4 grad_accum | 1 x 4 grad_accum | 1 x 4 grad_accum |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
 
@@ -85,7 +85,7 @@ Window=10, promote >50%, demote <20%
 
 ### Multi-Turn Rollout (`multi_turn_rollout.py`)
 
-`make_multi_turn_rollout(max_turns=5, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. Extracts cuda code, evals on Modal (5 graphs, 50 warmup, 30 runs), early exit at reward>=3.0. Single-turn wrapper: `reward_from_env(completions, **kwargs) -> list[float]`.
+`make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. Extracts cuda code, evals on Modal (5 graphs, 50 warmup, 30 runs), early exit at reward>=1.6 (log(5.0), i.e. 5x+ speedup). Single-turn wrapper: `reward_from_env(completions, **kwargs) -> list[float]`.
 
 ### RFT Filter (`rft_filter.py`)
 
@@ -103,11 +103,11 @@ Dataset: `BytedTsinghua-SIA/CUDA-Agent-Ops-6K`. `load_cuda_agent_prompt_dataset(
 | Nsight structured rewards | GRPO-9 line 1276 | `training/hybrid_rollout.py` |
 | CPPO completion pruning | GRPO-11 line 1403 | (in custom_grpo_loop.py) |
 | MASPO soft trust region | GRPO-12 line 1446 | `training/maspo_loss.py` |
-| Transformation grammar | GRPO-13 line 1490 | `openenv_env/transform_grammar.py` |
+| ~~Transformation grammar~~ | GRPO-13 line 1490 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
 
 ### Abort Conditions
 
-reward=-1 after 30 steps (dataset issue), std=0 (collapsed), NaN loss (LR too high), OOM (reduce G/batch/seq)
+reward=-1 after 30 steps (dataset issue), std=0 (collapsed), NaN loss (LR too high), OOM (reduce G/batch/seq), Gate G-0.8 failure (non-zero gradients + >1.2x on 2/20 kernels) → abandon GRPO, use SFT + SkyDiscover only
 
 ---
 
@@ -126,14 +126,14 @@ KernelForgeObservation(Observation): text, baseline_original_ms, baseline_double
 
 ### Reward (`reward.py`)
 
-`compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile) -> float`
+`compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile, occupancy=None, mem_coalescing=None, warp_efficiency=None) -> float`
 
 | Return | Condition |
 |--------|-----------|
 | -1.0 | not compiled OR not correct |
-| 3.0 | speedup_vs_compile > 1.05 |
-| 2.0 | speedup_vs_eager > 1.05 |
-| 1.0 | correct, no meaningful speedup |
+| log(speedup) + nsight_bonus | correct kernel (continuous signal) |
+
+Plus `trloo_post_process(advantages, n)` for N/(N-1) gradient correction.
 
 ### Anti-Hack (`anti_hack.py`)
 
@@ -160,8 +160,8 @@ Allowed CU_FLAGS: `--use_fast_math`, `--extra-device-vectorization`, `--rdc=true
 
 ### NOT YET IMPLEMENTED
 
-- `transform_grammar.py` — 40-rule grammar parser + prompt template (GRPO-13 line 1490)
-- `reward_nsight.py` — Nsight Compute bonus [0, 0.5] (GRPO-9 line 1276)
+- ~~`transform_grammar.py`~~ — DEFERRED to v2
+- `reward_nsight.py` — Nsight metrics integration (occupancy, coalescing, warp efficiency) into continuous reward
 
 ---
 
@@ -210,7 +210,7 @@ Turn 1-2: local nvcc only. Turn 3: local + PAC verify. Turn 4+: Modal + ncu.
 
 ### NOT YET IMPLEMENTED
 
-- `evaluation/reward_nsight.py` — Nsight continuous bonus [0, 0.5] (GRPO-9 line 1276)
+- Nsight metrics integration into Modal eval endpoint (occupancy, coalescing, warp efficiency passed to continuous reward)
 - CPPO `cheap_cuda_score()` pre-filter (GRPO-11 line 1403): +1 for __global__, +1 __shared__, +1 threadIdx/blockIdx, +2 local nvcc compile; skip Modal if below threshold
 
 ---

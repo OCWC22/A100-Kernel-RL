@@ -55,7 +55,7 @@ System 3 reasoning with Input Generator (adversarial graphs) and Algorithmic Ver
 ### 4. **3-Stage RL Training Pipeline**
 - **Stage 1**: GRPO warm-up (LR=3e-6, T=0.9, 300 steps, easy subset)
 - **Stage 2**: Rejection Fine-Tuning (reward >= 1.0, SFT 3 epochs)
-- **Stage 3**: GRPO + curriculum (LR=5e-6, T=0.7, 200 steps, 4 phases)
+- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, 10 steps P3 demo, local-only eval)
 
 ## 🚀 Quick Start
 
@@ -132,8 +132,11 @@ model = FastModel.get_peft_model(
 )
 ```
 
-### Reward Function (Milestone-Based)
+### Reward Function (Continuous)
 ```python
+import math
+from openenv_env.reward import compute_reward, trloo_post_process
+
 def cuda_kernel_reward(completions, **kwargs):
     # Dispatch to Modal target GPU backend for evaluation
     result = eval_fn.remote({
@@ -142,16 +145,19 @@ def cuda_kernel_reward(completions, **kwargs):
         "warmup_iters": 50,
         "benchmark_runs": 30,
     })
-    
-    # Discrete milestones prevent reward hacking
-    if not result["compiles"] or not result["correct"]:
-        return -1.0  # Compilation/verification failure
-    elif result["speedup_vs_dg"] > 1.05:
-        return 3.0   # Beats BOTH baselines
-    elif result["speedup_vs_orig"] > 1.05:
-        return 2.0   # Beats cuGraph
-    else:
-        return 1.0   # Correct but slow
+
+    # Continuous reward: log(speedup) + Nsight bonus
+    # -1.0 for compile/verification failure
+    # log(speedup_vs_eager) + 0.4*occupancy + 0.3*mem_coalescing + 0.2*warp_efficiency
+    return compute_reward(
+        compiled=result["compiles"],
+        correct=result["correct"],
+        speedup_vs_eager=result.get("speedup_vs_orig", 0),
+        speedup_vs_compile=result.get("speedup_vs_dg", 0),
+        occupancy=result.get("occupancy"),
+        mem_coalescing=result.get("mem_coalescing"),
+        warp_efficiency=result.get("warp_efficiency"),
+    )
 ```
 
 ## 🔬 Verification System
@@ -266,19 +272,10 @@ uv run python training/rft_filter.py --trajectories 100 --min-reward 1.0
 uv run python training/stage2_rft.py
 ```
 
-Optional CUDA-Agent prompt augmentation for RFT:
+### Stage 3: TRLOO-augmented GRPO + Curriculum (P3 Demo)
 ```bash
-CUDA_AGENT_RFT_PROMPTS=128 uv run python training/rft_filter.py --trajectories 100 --min-reward 1.0
-```
-
-### Stage 3: GRPO + Curriculum
-```bash
+# 10 steps, G=2, local-only eval, requires Gate G-0.8 pass first
 uv run python training/stage3_grpo.py
-```
-
-Optional CUDA-Agent prompt augmentation for GRPO:
-```bash
-CUDA_AGENT_MAX_SAMPLES=2048 uv run python training/stage3_grpo.py
 ```
 
 ### CUDA-Agent Integration
@@ -379,10 +376,11 @@ docker run --gpus all -p 8501:8501 kernelforge-openenv
 - [x] Baseline kernels and profiling
 - [x] Training pipeline dry run
 
-### Day 1 (Build)
-- [ ] Stage 1: SFT warm-up (50 examples)
-- [ ] Stage 2: RFT filtering (reward ≥ 2)
-- [ ] Stage 3: GRPO training (100 steps)
+### Day 1 (Build) — 4-Tier Priority
+- [ ] **P0**: Eval pipeline + continuous reward (must work first)
+- [ ] **P1**: SkyDiscover evolutionary search (parallel, primary hedge)
+- [ ] **P2**: SFT warmup (50 examples, >70% compile rate) + SKILL.md context
+- [ ] **P3**: Optional 10-step GRPO demo (only if Gate G-0.8 passes)
 
 ### Day 2 (Ship)
 - [ ] Final evaluation on large graphs

@@ -13,9 +13,9 @@
 | **Type** | GRPO warm-up | RFT (SFT on filtered) | GRPO + curriculum |
 | **LR** | 3e-6 | 5e-6 | 5e-6 |
 | **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
-| **G (generations)** | 4 | — | 4 |
-| **Max turns** | 3 | — | 5 |
-| **Steps/Epochs** | 300 steps | 3 epochs | 200 steps |
+| **G (generations)** | 4 | — | 2 |
+| **Max turns** | 3 | — | 3 |
+| **Steps/Epochs** | 300 steps | 3 epochs | 10 steps (P3 demo) |
 | **Batch** | 1 × 4 grad_accum | 1 × 4 grad_accum | 1 × 4 grad_accum |
 | **Optimizer** | paged_adamw_8bit | — | paged_adamw_8bit |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
@@ -54,16 +54,16 @@
 
 ## Multi-Turn Rollout (`multi_turn_rollout.py`)
 
-### `make_multi_turn_rollout(max_turns=5, skill_md_gpu=None) -> Callable`
+### `make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable`
 Returns TRL-compatible `rollout_func(prompt_ids, ...) -> dict` with keys:
 `prompt_ids`, `completion_ids`, `logprobs`, `env_reward`
 
 ### Flow per completion:
 1. Generate response → `extract_cuda_code(text)` extracts ```cuda blocks
 2. `_evaluate_on_modal(code)` → compile + PAC verify + benchmark (5 graphs, 50 warmup, 30 runs)
-3. `_compute_reward_from_result(result)` → discrete {-1, 1, 2, 3}
+3. `_compute_reward_from_result(result)` → continuous log(speedup) + Nsight bonus
 4. `_format_feedback(result, reward, turn)` → feedback text for next turn
-5. **Early exit** at reward >= 3.0
+5. **Early exit** at reward >= 1.6 (log(5.0), i.e. 5x+ speedup)
 
 ### `reward_from_env(completions, **kwargs) -> list[float]`
 Single-turn wrapper for Stage 1.
@@ -93,7 +93,7 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 | Nsight structured rewards | GRPO-9 line 1276 | `hybrid_rollout.py` |
 | CPPO completion pruning | GRPO-11 line 1403 | (in custom_grpo_loop.py) |
 | MASPO soft trust region | GRPO-12 line 1446 | `maspo_loss.py` |
-| Transformation grammar | GRPO-13 line 1490 | `openenv_env/transform_grammar.py` |
+| ~~Transformation grammar~~ | GRPO-13 line 1490 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
 
 ## Files to Create
 
@@ -107,6 +107,7 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 - reward std = 0 → model collapsed
 - NaN loss → LR too high or gradient explosion
 - OOM → reduce G, batch, or seq_length
+- Gate G-0.8 failure (non-zero gradients + >1.2x on 2/20 kernels) → abandon GRPO, use SFT + SkyDiscover only
 
 ## Deep Dive Pointers
 

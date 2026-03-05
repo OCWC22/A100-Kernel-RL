@@ -8,7 +8,7 @@
 >
 > Dr. Kernel shows GRPO saturates at ~200 steps on KernelBench Level-2, while their TRLOO (Turn-level Reinforce Leave-One-Out) continues improving. Five of six concurrent CUDA kernel RL systems (Feb-Mar 2026) chose algorithms other than GRPO. See **FINAL_PRD Section 6.0** for full competitive landscape analysis.
 >
-> **Mitigation (Revised March 5, 2026):** MARS+TRLOO hybrid credit assignment (GRPO-4, GRPO-9) directly addresses this bias by computing per-turn cumulative returns with leave-one-out baselines. Combined with CPPO pruning (GRPO-11), Nsight structured rewards (GRPO-10), MASPO soft trust region (GRPO-12), and transformation grammar (GRPO-13), GRPO becomes viable for single-GPU hackathon settings with Qwen3-Coder-Next 80B FP8 on B200. See **GRPO-9 through GRPO-14** for the complete stacked architecture.
+> **Mitigation (Revised March 5, 2026):** MARS+TRLOO hybrid credit assignment (GRPO-4, GRPO-9) directly addresses this bias by computing per-turn cumulative returns with leave-one-out baselines. Combined with CPPO pruning (GRPO-11), continuous log(speedup) + Nsight rewards (GRPO-9/GRPO-10), and MASPO soft trust region (GRPO-12), GRPO becomes viable for single-GPU hackathon settings with Qwen3-Coder-Next 80B FP8 on B200. Transformation grammar (GRPO-13) deferred to v2. See **GRPO-9 through GRPO-14** for the architecture.
 
 ---
 
@@ -1375,6 +1375,30 @@ def multi_turn_hybrid_rollout(prompts, trainer):
 
 ---
 
+### Gate G-0.8: 5-Step GRPO Sanity Check (Thu Night)
+
+**When:** Thursday night, after P0 eval pipeline is working.
+**What:** Run 5 GRPO steps with the new continuous reward function + TRLOO post-process.
+
+**Pass criteria:**
+1. Non-zero gradients in at least 4/5 steps
+2. Reward variance > 0 in at least 3/5 steps (i.e., not all completions get the same reward)
+3. At least 2 out of 20 test kernels (5 steps × 4 candidates) achieve >1.2× speedup vs torch.compile
+
+**Fail action:**
+- Zero gradients in >2 steps → reward function is broken. Debug reward computation.
+- Reward variance = 0 in >3 steps → model is collapsed or all outputs identical. Increase temperature to 1.2 or switch to backup model.
+- No kernels >1.2× → model cannot optimize on this task distribution. Fall back to SFT + SkyDiscover only. Do NOT continue to P3 GRPO.
+
+```bash
+# Gate G-0.8 validation
+KERNELFORGE_STAGE3_MAX_STEPS=5 KERNELFORGE_STAGE3_LOCAL_ONLY=1 \
+    python -m training.stage3_grpo
+# Check: non-zero gradients, reward variance, any speedup > 1.2x
+```
+
+---
+
 ## GRPO-5: Compute Budget on B200
 
 ### Time Per GRPO Step
@@ -1557,7 +1581,7 @@ ORIGINAL CONFIGURATION:
   G = 4 (num_generations)
   β = 0.0 (no KL penalty, DAPO style)
   ε = 0.2 (clip range)
-  Rewards = {-1, 1, 2, 3} (CUDA Agent Equation 1)
+  Rewards = continuous log(speedup) + Nsight bonus (replacing discrete {-1, 1, 2, 3})
   Temperature = 1.0 (Stage 1) → 1.0 (Stage 3)
   Learning rate = 2e-6 (Stage 1) → 3e-6 (Stage 3)
   LoRA rank = 16, target = qkvo + gate/up/down
@@ -1566,12 +1590,12 @@ STACKED CONFIGURATION (REVISED — March 5, 2026):
   G = 2 (reduced from 4 — fewer zero-gradient steps)
   Steps = 40-50 per stage (reduced from 80-100)
   Max turns = 3 (reduced from 5 — TRLOO bias compounds with turns)
-  Credit = MARS+TRLOO cumulative per-turn (GRPO-4, GRPO-9)
-  Reward = Nsight structured (continuous) + discrete milestones (GRPO-9)
+  Credit = MARS+TRLOO cumulative per-turn + N/(N-1) post-process (GRPO-4)
+  Reward = log(speedup) + Nsight structured (continuous). TRLOO N/(N-1) on advantages.
   Loss = MASPO soft trust σ=0.2 (GRPO-12) or standard clip
   Pruning = CPPO top-2 of G after cheap filter (GRPO-11)
-  Action space = Transformation grammar 12-40 rules (GRPO-13)
-  Eval = Hybrid: local nvcc+PAC turns 1-2, Modal+ncu turn 3 (GRPO-10)
+  Action space = Free-form + rich SKILL.md context (grammar deferred to v2)
+  Eval = Local nvcc only for P3 (no Modal). Hybrid local+Modal for stretch.
 
 B200 MEMORY:
   Coder-Next 80B FP8: ~100 GB total → 92 GB free (PRIMARY)
@@ -1581,8 +1605,9 @@ B200 MEMORY:
 HACKATHON BUDGET (STACKED):
   Stage 1: 40-50 steps × ~1-2 min = ~1.5 hours (hybrid eval)
   Stage 2: RFT = ~30 min
-  Stage 3: 40-50 steps × ~1-2 min = ~1.5 hours (hybrid eval + CPPO)
-  Total: ~3.5 hours (with stacked optimizations)
+  Stage 3: 10 steps × ~1-2 min = ~20 min (P3 optional demo, local-only)
+  Total: ~2.5 hours (with stacked optimizations)
+  Gate G-0.8: 5-step sanity check required before P3
 
 ABORT CONDITIONS:
   Reward mean stays at -1.0 after 30 steps → model can't compile
@@ -1630,10 +1655,12 @@ ncu --metrics \
 }
 ```
 
-**Reward formula (backward-compatible with discrete milestones):**
+**Reward formula (continuous log(speedup) + Nsight — replaces discrete {-1,1,2,3}):**
 
 ```python
-def compute_reward_nsight(
+import math
+
+def compute_reward(
     compiled: bool,
     correct: bool,
     speedup_vs_eager: float,
@@ -1642,33 +1669,43 @@ def compute_reward_nsight(
     mem_coalescing: float | None = None,
     warp_efficiency: float | None = None,
 ) -> float:
-    """Nsight-structured reward. Backward compat when metrics are None."""
+    """Continuous reward: log(speedup) + Nsight bonus.
+
+    Fix 5: Replaces discrete {-1, 1, 2, 3} with continuous signal.
+    log(1.0)=0, log(2.0)=0.69, log(5.0)=1.61 — proportional gradient.
+    """
     if not compiled or not correct:
         return -1.0
 
-    # Base discrete milestones (unchanged)
-    base = 1.0
-    if speedup_vs_compile > 1.05:
-        base = 3.0
-    elif speedup_vs_eager > 1.05:
-        base = 2.0
+    # Continuous speedup signal (log scale)
+    base = math.log(max(speedup_vs_eager, 0.1))
 
-    # If no Nsight metrics, return discrete (old behavior)
-    if occupancy is None:
-        return base
+    # Nsight bonus when profiling metrics available
+    if occupancy is not None:
+        occ = max(0.0, min(1.0, occupancy))
+        mem = max(0.0, min(1.0, mem_coalescing or 0.0))
+        warp = max(0.0, min(1.0, warp_efficiency or 0.0))
+        base += 0.4 * occ + 0.3 * mem + 0.2 * warp
 
-    # Continuous Nsight bonus (range 0.0 to 1.0)
-    occ = max(0.0, min(1.0, occupancy))
-    mem = max(0.0, min(1.0, mem_coalescing))
-    warp = max(0.0, min(1.0, warp_efficiency))
-    nsight_bonus = (0.8 * occ + 0.6 * mem + 0.4 * warp) / 1.8
+    return base
 
-    return base + nsight_bonus  # Range: [1.0, 4.0]
+
+def trloo_post_process(advantages: list[float], n: int) -> list[float]:
+    """Scale GRPO advantages by N/(N-1) to correct gradient shrinkage.
+
+    Dr. Kernel (arXiv 2602.05885) proves GRPO's self-inclusion bias
+    shrinks expected gradients by (1 - 1/N). With G=4, that's 25%.
+    Drop-in fix for TRL GRPOTrainer — no custom training loop needed.
+    """
+    if n <= 1:
+        return advantages
+    scale = n / (n - 1)
+    return [a * scale for a in advantages]
 ```
 
-**Why this matters for learning:** The model now gets a gradient signal from occupancy even when two kernels have the same wall-time speedup. "Your kernel compiles and is correct but occupancy is 0.3 — try increasing block size" → reward 1.13 vs "occupancy is 0.9" → reward 1.4. The model can learn A100-specific optimizations through reward shaping.
+**Why this matters for learning:** The continuous log(speedup) signal gives proportional gradients — a 3x kernel gets more reward than 1.1x, instead of both landing in the same discrete bucket. The Nsight bonus provides gradient signal from occupancy even when two kernels have similar wall-time speedups. TRLOO post-processing is a drop-in fix that corrects the 25% gradient shrinkage without requiring a custom training loop.
 
-**Files:** `evaluation/reward_nsight.py` (replace `openenv_env/reward.py`), `modal_app.py` (add `_ncu_profile()` + wire into `evaluate_kernel()`)
+**Files:** `openenv_env/reward.py` (rewritten with continuous reward + TRLOO), `modal_app.py` (add `_ncu_profile()` + wire into `evaluate_kernel()`)
 
 ---
 
@@ -1807,7 +1844,9 @@ def maspo_policy_loss(log_probs, old_log_probs, advantages, sigma=0.2):
 
 ---
 
-## GRPO-13: Transformation Grammar (40 Rules)
+## GRPO-13: Transformation Grammar (40 Rules) — DEFERRED TO v2
+
+> **DEFERRED TO v2 (Fix 4):** Transformation grammar has not been shipped for CUDA kernels by any production system as of March 2026. The 12-40 rules below are theoretical. For v1, use CUDA-Agent's SKILL.md verbatim + doubleGraph pattern paste instead. This section is retained for reference but is NOT in the v1 implementation priority.
 
 ### The Problem
 
@@ -1972,29 +2011,30 @@ STAGE 2 — RFT:
   Goal: Anchor compilation ability
 
 STAGE 3 — CURRICULUM (Qwen3-Coder-Next 80B FP8):
-  Steps: 40-50
+  Steps: 10 (P3 optional demo — only if G-0.8 passes)
   G: 2
   Max turns: 3
   Temperature: 1.0
   LR: 3e-6
-  Action: Transformation grammar (model proposes transforms)
-  Eval: Hybrid + CPPO pruning
+  Action: Free-form generation with rich SKILL.md context (transformation grammar deferred to v2)
+  Eval: Local nvcc only (no Modal) + CPPO pruning
   Credit: MARS+TRLOO
-  Reward: Nsight structured (continuous)
+  Reward: Continuous log(speedup) + Nsight bonus
   Loss: MASPO soft trust (σ=0.2)
-  Goal: Learn A100 optimization patterns
+  Goal: Proof-of-concept RL optimization signal
 ```
 
-### New Files Summary (~450 LOC)
+### New Files Summary (~200 LOC, down from ~450 — transformation grammar dropped)
 
 | File | LOC | Purpose |
 |------|-----|---------|
-| `training/custom_grpo_loop.py` | ~180 | MARS+TRLOO advantage computation, CPPO pruning, MASPO loss integration |
-| `evaluation/reward_nsight.py` | ~60 | Nsight structured reward (backward compat with discrete) |
-| `openenv_env/transform_grammar.py` | ~250 | 12-40 rule grammar + parser + applicator |
-| `training/hybrid_rollout.py` | ~120 | Local+Modal hybrid eval, Nsight feedback |
-| `modal_app.py` update | ~40 | `_ncu_profile()` + `/batch_nsight` endpoint |
-| `training/stage3_grpo.py` update | ~20 | Revised configs (G=2, steps=50, MASPO) |
+| `training/custom_grpo_loop.py` | ~100 | MARS+TRLOO advantage computation, CPPO pruning |
+| `openenv_env/reward.py` (rewrite) | ~60 | Continuous log(speedup) + Nsight bonus + TRLOO post-process |
+| `training/hybrid_rollout.py` | ~80 | Local nvcc eval (no Modal for P3) |
+| `modal_app.py` update | ~20 | Nsight profiling endpoint (stretch goal) |
+| `training/stage3_grpo.py` update | ~20 | Revised configs (G=2, steps=10, local-only) |
+
+**Dropped from v1:** `openenv_env/transform_grammar.py` (~250 LOC) — transformation grammar deferred to v2.
 
 ### Expected Performance
 

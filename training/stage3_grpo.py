@@ -1,17 +1,18 @@
 """
-Stage 3: GRPO with Curriculum — the main RL training stage.
+Stage 3: GRPO with Curriculum — P3 optional demo (10 steps, local-only eval).
 
 Multi-turn agentic training via TRL's rollout_func:
-  - 5 turns per episode (harder problems need more iteration)
+  - 3 turns per episode (reduced from 5 — TRLOO bias compounds with turns)
   - CurriculumManager for progressive difficulty
-  - Lower temperature (0.7) for exploitation
-  - Higher LR (5e-6) for faster convergence
-  - 200 max_steps (was 60; increased for multi-turn budget)
+  - Temperature 0.7 for exploitation
+  - LR 5e-6 for faster convergence
+  - 10 max_steps (P3 demo — only if Gate G-0.8 passes)
+  - G=2 (reduced from 4 — fewer zero-gradient steps)
+  - Local nvcc eval only, no Modal
   - vLLM colocate mode for generation
 
-ByteDance Stage 4 (agentic PPO) is the longest stage (~60% of compute).
-Our GRPO equivalent uses rollout_func for multi-turn with curriculum-aware sampling.
-See docs/TRAINING_PLAN.md for full rationale.
+GRPO is experimental. SkyDiscover + SFT are primary hedges.
+See docs/GRPO_DEEP_DIVE.md GRPO-14 for full stacked architecture.
 """
 from __future__ import annotations
 
@@ -30,9 +31,10 @@ MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 STAGE2_OUTPUT = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE3_OUTPUT", "outputs/kernelforge-stage3")
 
-# Multi-turn configuration
-MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "5"))
-MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "200"))
+# Multi-turn configuration (P3 demo defaults)
+MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "3"))
+MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "10"))
+LOCAL_ONLY = os.getenv("KERNELFORGE_STAGE3_LOCAL_ONLY", "1") == "1"
 
 
 # Global curriculum manager — shared between reward function and training loop
@@ -87,7 +89,7 @@ def main():
     config = GRPOConfig(
         learning_rate=5e-6,
         temperature=0.7,         # Lower temp for exploitation
-        num_generations=4,
+        num_generations=2,          # Reduced from 4 (fewer zero-gradient steps)
         max_prompt_length=512,
         max_completion_length=4096,
         per_device_train_batch_size=1,
