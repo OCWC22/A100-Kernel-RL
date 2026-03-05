@@ -1,0 +1,200 @@
+"""
+KernelForge OpenEnv Environment for target-GPU CUDA kernel RL training.
+
+OpenEnv is an independent framework from Meta-PyTorch (NOT a Gymnasium
+extension). HTTP client-server architecture with Docker container isolation.
+Correct install (uv): uv add "openenv-core[core]>=0.2.1" (NOT "openenv")
+"""
+import os
+from typing import Any
+from uuid import uuid4
+
+from pydantic import Field
+
+from openenv.core.env_server import Environment, create_fastapi_app
+from openenv.core.env_server.types import Action, Observation, State
+from openenv_env.gpu_registry import get_gpu_spec
+from openenv_env.reward import compute_reward
+from openenv_env.skill_builder import build_skill_md
+
+
+class KernelForgeAction(Action):
+    """Action payload: CUDA kernel source code."""
+
+    cuda_code: str = Field(..., description="CUDA kernel source code string")
+
+
+class KernelForgeObservation(Observation):
+    """Observation payload returned by KernelForgeEnv."""
+
+    text: str = Field(..., description="Environment feedback text")
+    baseline_original_ms: float | None = None
+    baseline_doublegraph_ms: float | None = None
+    hardware: dict[str, Any] = Field(default_factory=dict)
+    turn: int = 0
+    best_reward: float = -1.0
+    info: dict[str, Any] = Field(default_factory=dict)
+
+
+class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, State]):
+    """
+    RL environment: agent submits CUDA source -> target GPU compiles/verifies/benchmarks.
+
+    Action space: CUDA source code string
+    Observation: SKILL.md + compilation/verification/benchmark feedback + history
+    Reward: discrete milestones {-1, +1, +2, +3}
+    Max turns: 200 (ByteDance used 150; extended for hackathon exploration)
+    Context: 128K tokens
+    """
+
+    def __init__(self, modal_function_name="kernelforge-a100"):
+        super().__init__()
+        self.modal_fn = modal_function_name
+        self.target_gpu = os.getenv("KERNELFORGE_TARGET_GPU", "a100").lower()
+        self.gpu_spec = get_gpu_spec(self.target_gpu)
+        self.history = []               # Time-travel snapshots (DoubleAI-inspired)
+        self.turn = 0
+        self.max_turns = 200
+        self.best_reward = -1.0
+        self.best_code = None
+        self.original_baseline_ms = None
+        self.doublegraph_baseline_ms = None
+        self._state = State(episode_id=str(uuid4()), step_count=0)
+
+    def reset(
+        self,
+        seed: int | None = None,
+        episode_id: str | None = None,
+        **kwargs: Any,
+    ) -> KernelForgeObservation:
+        """Reset environment. Profile baselines on first call."""
+        self.history = []
+        self.turn = 0
+        self.best_reward = -1.0
+        self.best_code = None
+        self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
+
+        if self.original_baseline_ms is None:
+            baselines = self._modal("profile_baselines")
+            self.original_baseline_ms = baselines["original_ms"]
+            self.doublegraph_baseline_ms = baselines.get("doublegraph_ms")
+
+        return KernelForgeObservation(
+            text=build_skill_md(self.target_gpu),
+            baseline_original_ms=self.original_baseline_ms,
+            baseline_doublegraph_ms=self.doublegraph_baseline_ms,
+            hardware=self.gpu_spec,
+            reward=0.0,
+            done=False,
+            turn=self.turn,
+            best_reward=self.best_reward,
+            info={"phase": "reset"},
+        )
+
+    def step(
+        self,
+        action: KernelForgeAction,
+        timeout_s: float | None = None,
+        **kwargs: Any,
+    ) -> KernelForgeObservation:
+        """Execute one environment step from CUDA source code action."""
+        self.turn += 1
+        self._state.step_count = self.turn
+
+        result = self._modal("evaluate_kernel", {
+            "cuda_code": action.cuda_code,
+            "verify_graphs": 5,
+            "warmup_iters": 50,
+            "benchmark_runs": 30,
+            "baseline_original_ms": self.original_baseline_ms,
+            "baseline_doublegraph_ms": self.doublegraph_baseline_ms,
+        })
+
+        # Compute speedups and reward via canonical function (P1-8)
+        if not result.get("compiles"):
+            reward = -1.0
+            su_orig = 0
+            obs = (f"COMPILATION FAILED (turn {self.turn}/{self.max_turns}):\n"
+                   f"{result.get('error', 'Unknown error')[:1500]}")
+        elif not result.get("correct"):
+            reward = -1.0
+            su_orig = 0
+            obs = (f"VERIFICATION FAILED (turn {self.turn}/{self.max_turns}):\n"
+                   f"{result.get('verifier_msg', 'Unknown failure')}")
+        else:
+            rt = result["runtime_ms"]
+            su_orig = self.original_baseline_ms / rt if rt > 0 else 0
+            su_dg = (self.doublegraph_baseline_ms / rt
+                     if self.doublegraph_baseline_ms and rt > 0 else 0)
+
+            reward = compute_reward(
+                compiled=True,
+                correct=True,
+                speedup_vs_eager=su_orig,
+                speedup_vs_compile=su_dg,
+            )
+
+            obs = (f"BENCHMARK (turn {self.turn}/{self.max_turns}):\n"
+                   f"  Runtime: {rt:.3f}ms\n"
+                   f"  vs cuGraph: {su_orig:.2f}x")
+            if su_dg:
+                obs += f"\n  vs doubleGraph: {su_dg:.2f}x"
+            obs += f"\n  Stats: {result.get('runtime_stats', {})}"
+
+            if reward > self.best_reward:
+                self.best_reward = reward
+                self.best_code = action.cuda_code
+
+        done = (self.turn >= self.max_turns) or (reward == 3.0)
+
+        # Time-travel with experience (DoubleAI-inspired)
+        # Each snapshot carries knowledge of what was tried and what failed
+        self.history.append({
+            "turn": self.turn,
+            "reward": reward,
+            "obs_summary": obs[:200],
+        })
+
+        # Include history in observation for time-travel context
+        if len(self.history) > 1:
+            history_ctx = "\n--- Previous attempts (time-travel context) ---\n"
+            for h in self.history[:-1]:
+                history_ctx += (f"Turn {h['turn']}: reward={h['reward']}, "
+                               f"{h['obs_summary'][:80]}\n")
+            obs = history_ctx + "\n--- Current result ---\n" + obs
+
+        return KernelForgeObservation(
+            text=obs,
+            reward=reward,
+            done=done,
+            turn=self.turn,
+            best_reward=self.best_reward,
+            info={
+                "turn": self.turn,
+                "best_reward": self.best_reward,
+                "speedup": su_orig if result.get("correct") else 0,
+            },
+        )
+
+    @property
+    def state(self) -> State:
+        return State(
+            episode_id=self._state.episode_id,
+            step_count=self.turn,
+            history=self.history,
+            best_reward=self.best_reward,
+        )
+
+    def _modal(self, fn_name, payload=None):
+        """Dispatch to configured Modal app."""
+        import modal
+        fn = modal.Function.from_name(self.modal_fn, fn_name)
+        if payload is None:
+            return fn.remote()
+        return fn.remote(payload)
+
+
+
+# OpenEnv HTTP server entrypoint
+# Run: uvicorn openenv_env.kernel_forge_env:app --host 0.0.0.0 --port 8080
+app = create_fastapi_app(KernelForgeEnv, KernelForgeAction, KernelForgeObservation)

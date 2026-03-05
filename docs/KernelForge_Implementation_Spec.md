@@ -768,7 +768,7 @@ GRPO (Group Relative Policy Optimization) eliminates the critic entirely. Instea
 Evidence that GRPO is sufficient: DeepSeek-R1 used GRPO (not PPO) on a 671B model and achieved near-parity with PPO-based systems. TRL's GRPOTrainer is the standard implementation.
 
 ```python
-# grpo_training.py — The actual RL training loop
+# training/stage3_grpo.py — The actual RL training loop
 from trl import GRPOConfig, GRPOTrainer
 
 config = GRPOConfig(
@@ -1253,3 +1253,313 @@ KernelForge-OpenEnv/
 | Unsloth cannot do GPTQ QLoRA for MoE | Research transcript | BitsAndBytes nn.Parameter limitation |
 | H100 GPTQ path: ~53GB total | Research transcript | Memory budget calculation |
 | B200 bf16 path: ~171GB total | Research transcript | Memory budget calculation |
+
+---
+
+## Appendix D: Missing Components and Gap Resolution
+
+This section documents known gaps between the implementation and the Truth.md specification, with resolution strategies.
+
+### D.1 Verification Scope (CRITICAL)
+
+**Gap:** Current implementation only verifies WCC (Weakly Connected Components) kernels.
+
+**Truth.md Claims:**
+- "Multi-algorithm from Ops-6K" (Part 3.2)
+- Support for matmul, softmax, attention, etc.
+
+**Current Implementation:**
+- `pac_verify.py` hardcoded for WCC with `wcc_kernel` entry point
+- CSR input format specific to graph algorithms
+
+**Resolution Strategy:**
+
+```python
+# verification/general_verify.py (TO BE CREATED)
+
+class KernelVerifier:
+    """General-purpose kernel verification framework."""
+    
+    VERIFIER_REGISTRY = {
+        "wcc": verify_wcc,
+        "matmul": verify_matmul,
+        "softmax": verify_softmax,
+        "attention": verify_attention,
+        "reduction": verify_reduction,
+    }
+    
+    ENTRY_POINT_REGISTRY = {
+        "wcc": "wcc_kernel",
+        "matmul": "matmul_kernel",
+        "softmax": "softmax_kernel",
+        "attention": "attention_kernel",
+        "reduction": "reduce_kernel",
+    }
+    
+    def verify(self, kernel_type: str, kernel_lib: str, inputs: list) -> tuple[bool, str]:
+        verifier = self.VERIFIER_REGISTRY[kernel_type]
+        return verifier(kernel_lib, inputs)
+
+def verify_matmul(kernel_lib: str, inputs: list) -> tuple[bool, str]:
+    """Verify matrix multiplication kernel."""
+    import torch
+    A, B = inputs
+    
+    # Reference implementation
+    C_ref = torch.matmul(A, B)
+    
+    # Kernel execution
+    C_kernel = run_matmul_kernel(kernel_lib, A, B)
+    
+    # Comparison
+    if torch.allclose(C_kernel, C_ref, rtol=1e-3, atol=1e-3):
+        return True, "Matmul verified"
+    return False, "Matmul mismatch"
+```
+
+**Priority:** P0 — Required for non-WCC operators in Ops-6K.
+
+### D.2 Secondary Baseline Kernel (CRITICAL)
+
+**Gap:** No secondary baseline kernel configured, preventing reward=3 achievement.
+
+**Truth.md Reward Function:**
+- Reward=3 requires `speedup_vs_compile > 1.05`
+- `speedup_vs_compile` compares against torch.compile or DoubleGraph baseline
+
+**Current Implementation:**
+- `profile_baselines()` only profiles primary baseline
+- `SECONDARY_BASELINE_KERNEL` env var exists but no kernel configured
+
+**Resolution:**
+
+```bash
+# .env.local
+export KERNELFORGE_SECONDARY_BASELINE_KERNEL=kernels/clustered_wcc_h100.cu
+```
+
+Or add a torch.compile baseline:
+
+```python
+# modal_app.py enhancement
+
+@app.function(gpu=TARGET_GPU, image=cuda_image, timeout=300)
+def profile_torch_compile_baseline(problem: dict) -> dict:
+    """Profile torch.compile baseline for a problem."""
+    import torch
+    import time
+    
+    # Get problem definition
+    fn = problem["fn"]  # PyTorch function
+    inputs = problem["inputs"]
+    
+    # Compile
+    compiled_fn = torch.compile(fn)
+    
+    # Warmup
+    for _ in range(50):
+        _ = compiled_fn(*inputs)
+    torch.cuda.synchronize()
+    
+    # Benchmark
+    times = []
+    for _ in range(30):
+        start = time.perf_counter()
+        _ = compiled_fn(*inputs)
+        torch.cuda.synchronize()
+        times.append((time.perf_counter() - start) * 1000)
+    
+    return {
+        "compile_time_ms": float(np.median(times)),
+        "problem_id": problem["id"],
+    }
+```
+
+**Priority:** P0 — Required for reward=3 detection.
+
+### D.3 Per-Operator Baselines (HIGH)
+
+**Gap:** Single WCC baseline, not per-operator baselines as Truth.md specifies.
+
+**Truth.md Part 9.3:**
+- "For each operator, pre-compute on A100: eager_time_ms, compile_time_ms"
+
+**Current Implementation:**
+- `datasets/baselines.jsonl` exists but contains WCC only
+- `compute_baselines.py` not integrated with Ops-6K
+
+**Resolution:**
+
+```python
+# datasets/compute_all_baselines.py
+
+import modal
+from datasets import load_dataset
+
+def compute_all_baselines():
+    """Pre-compute baselines for all Ops-6K operators."""
+    ops6k = load_dataset("BytedTsinghua-SIA/CUDA-Agent-Ops-6K", split="train")
+    
+    baseline_fn = modal.Function.from_name("kernelforge-a100", "profile_operator_baseline")
+    
+    baselines = []
+    for op in ops6k:
+        result = baseline_fn.remote({
+            "code": op["code"],
+            "ops": op["ops"],
+            "num_runs": 30,
+        })
+        baselines.append({
+            "id": op["id"],
+            "ops": op["ops"],
+            "eager_time_ms": result["eager_ms"],
+            "compile_time_ms": result["compile_ms"],
+        })
+    
+    # Save
+    with open("datasets/baselines_all.jsonl", "w") as f:
+        for b in baselines:
+            f.write(json.dumps(b) + "\n")
+
+if __name__ == "__main__":
+    compute_all_baselines()
+```
+
+**Priority:** P1 — Required for accurate speedup computation across operators.
+
+### D.4 Sandbox Isolation (MEDIUM)
+
+**Gap:** No sandbox isolation for kernel evaluation.
+
+**Security Risk:**
+- Kernel code runs with full GPU access
+- Potential for malicious code execution
+- No resource limits
+
+**Resolution:**
+
+```python
+# modal_app.py enhancement
+
+@app.function(
+    gpu=TARGET_GPU,
+    image=cuda_image,
+    timeout=120,
+    volumes={"/cache": kernel_cache},
+    # Add resource limits
+    cpu=2.0,
+    memory=8192,  # 8GB host memory limit
+)
+def evaluate_kernel_sandboxed(payload: dict) -> dict:
+    """Evaluate kernel in sandboxed environment."""
+    import subprocess
+    
+    # Additional security checks
+    cuda_code = payload["cuda_code"]
+    
+    # 1. Check for dangerous patterns
+    DANGEROUS_PATTERNS = [
+        "system(", "popen(", "exec(", "fork(",
+        "#include <stdlib.h>",  # Could use system calls
+    ]
+    for pattern in DANGEROUS_PATTERNS:
+        if pattern in cuda_code:
+            return {"error": f"Dangerous pattern detected: {pattern}", "compiles": False}
+    
+    # 2. Compile with restricted flags
+    # 3. Run with timeout and memory limits
+    # ... existing evaluation logic ...
+```
+
+**Priority:** P1 — Security enhancement.
+
+### D.5 Network Isolation (MEDIUM)
+
+**Gap:** No network isolation during evaluation.
+
+**Anti-Hacking Concern:**
+- Model could generate code that fetches solutions from web
+- Truth.md specifies "No web retrieval" as anti-hacking measure
+
+**Resolution:**
+
+```python
+# modal_app.py enhancement
+
+@app.function(
+    gpu=TARGET_GPU,
+    image=cuda_image,
+    timeout=120,
+    # Network isolation via Modal
+    network=None,  # Disable network access
+)
+def evaluate_kernel_isolated(payload: dict) -> dict:
+    """Evaluate kernel with network isolation."""
+    # No network access during evaluation
+    # Model cannot fetch external solutions
+    pass
+```
+
+**Priority:** P1 — Anti-hacking enhancement.
+
+### D.6 Trained Artifacts (CRITICAL)
+
+**Gap:** No trained checkpoints or datasets in repository.
+
+**Missing Artifacts:**
+- `outputs/kernelforge-stage1/` — Stage 1 GRPO checkpoint
+- `outputs/kernelforge-stage2/` — Stage 2 RFT checkpoint
+- `datasets/wcc_rft.jsonl` — RFT filtered trajectories
+- `outputs/kernelforge-stage3/` — Stage 3 GRPO checkpoint
+
+**Resolution:**
+
+Run the training pipeline:
+
+```bash
+# Complete training pipeline
+export KERNELFORGE_TARGET_GPU=A100
+export KERNELFORGE_TARGET_ARCH=sm_80
+
+uv sync
+modal deploy modal_app.py
+
+# Stage 1: GRPO Warm-up (2 hours)
+uv run python training/stage1_warmup.py
+
+# Stage 2: RFT (30 minutes)
+uv run python training/rft_filter.py
+uv run python training/stage2_rft.py
+
+# Stage 3: GRPO with Curriculum (1 hour)
+uv run python training/stage3_grpo.py
+```
+
+**Priority:** P0 — Required for hackathon demonstration.
+
+### D.7 Gap Summary Table
+
+| Gap | Priority | Impact | Resolution Effort |
+|-----|----------|--------|-------------------|
+| WCC-only verification | P0 | Cannot verify other kernels | 4-8 hours |
+| No secondary baseline | P0 | Cannot achieve reward=3 | 30 minutes |
+| No trained artifacts | P0 | Cannot run Stage 2/3 | 4-5 hours training |
+| Per-operator baselines | P1 | Inaccurate speedup | 2-4 hours |
+| Sandbox isolation | P1 | Security risk | 2 hours |
+| Network isolation | P1 | Anti-hacking gap | 30 minutes |
+
+### D.8 Quick Fix Commands
+
+```bash
+# Enable secondary baseline (immediate)
+echo 'KERNELFORGE_SECONDARY_BASELINE_KERNEL=kernels/clustered_wcc_h100.cu' >> .env.local
+
+# Run training pipeline (4-5 hours)
+uv run python training/stage1_warmup.py && \
+uv run python training/rft_filter.py && \
+uv run python training/stage2_rft.py && \
+uv run python training/stage3_grpo.py
+
+# Verify setup
+uv run python scripts/smoke_test.py
+```
