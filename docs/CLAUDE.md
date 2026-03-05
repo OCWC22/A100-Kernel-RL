@@ -53,6 +53,8 @@
 
 **Model**: Qwen/Qwen3-Coder-Next (80B MoE, 3B active, FP8 on B200 192GB), fallback Qwen/Qwen2.5-Coder-7B-Instruct
 
+> **GPU Split:** B200 = model weights + generation + gradient updates + local compile checks. **A100 (Modal) = all performance reward** (speedup timing, execution correctness, Nsight profiling). B200 timing ≠ A100 timing.
+
 ### Stage Configs
 
 | Param | Stage 1 (`stage1_warmup.py`) | Stage 2 (`stage2_rft.py`) | Stage 3 (`stage3_grpo.py`) |
@@ -85,7 +87,7 @@ Window=10, promote >50%, demote <20%
 
 ### Multi-Turn Rollout (`multi_turn_rollout.py`)
 
-`make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. Extracts cuda code, evals on Modal (5 graphs, 50 warmup, 30 runs), early exit at reward>=1.6 (log(5.0), i.e. 5x+ speedup). Single-turn wrapper: `reward_from_env(completions, **kwargs) -> list[float]`.
+`make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. B200 generates, Modal A100 evaluates (5 graphs, 50 warmup, 30 runs). 2-tier reward: fast path (CUDA events + correctness) for all, slow path (Nsight ncu) for top-k. Early exit at reward>=1.6 (log(5.0), i.e. 5x+ speedup). Single-turn wrapper: `reward_from_env(completions, **kwargs) -> list[float]`.
 
 ### RFT Filter (`rft_filter.py`)
 
@@ -130,10 +132,11 @@ KernelForgeObservation(Observation): text, baseline_original_ms, baseline_double
 
 | Return | Condition |
 |--------|-----------|
-| -1.0 | not compiled OR not correct |
-| log(speedup) + nsight_bonus | correct kernel (continuous signal) |
+| -1.0 | not compiled OR not execution-correct (compile-only is NOT sufficient per CUDABench) |
+| log(speedup) | fast path: CUDA events timing on A100 + execution correctness |
+| log(speedup) + nsight_bonus | slow path (top-k): + 0.4*occ + 0.3*mem + 0.2*warp from Nsight ncu |
 
-Plus `trloo_post_process(advantages, n)` for N/(N-1) gradient correction.
+Plus `trloo_post_process(advantages, n)` for N/(N-1) gradient correction (apply if Dr. Kernel derivation confirms; else vanilla GRPO with tight gates).
 
 ### Anti-Hack (`anti_hack.py`)
 

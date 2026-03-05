@@ -1,5 +1,9 @@
 """
-Stage 3: GRPO with Curriculum — P3 optional demo (10 steps, local-only eval).
+Stage 3: GRPO with Curriculum — P3 optional demo (10 steps).
+
+GPU split: B200 handles model weights + generation + gradient updates.
+           A100 (Modal) handles all performance reward (speedup, correctness).
+           You cannot optimize A100 performance by measuring on B200.
 
 Multi-turn agentic training via TRL's rollout_func:
   - 3 turns per episode (reduced from 5 — TRLOO bias compounds with turns)
@@ -8,7 +12,8 @@ Multi-turn agentic training via TRL's rollout_func:
   - LR 5e-6 for faster convergence
   - 10 max_steps (P3 demo — only if Gate G-0.8 passes)
   - G=2 (reduced from 4 — fewer zero-gradient steps)
-  - Local nvcc eval only, no Modal
+  - B200: local nvcc compile check (fast-fail syntax errors)
+  - A100 (Modal): execution correctness + speedup timing for reward
   - vLLM colocate mode for generation
 
 GRPO is experimental. SkyDiscover + SFT are primary hedges.
@@ -34,7 +39,9 @@ OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE3_OUTPUT", "outputs/kernelforge-stage3"
 # Multi-turn configuration (P3 demo defaults)
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "3"))
 MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "10"))
-LOCAL_ONLY = os.getenv("KERNELFORGE_STAGE3_LOCAL_ONLY", "1") == "1"
+# B200 local compile check for fast-fail; Modal A100 for performance reward.
+# Set LOCAL_COMPILE_CHECK=0 to skip local compile pre-check (slower but simpler).
+LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_STAGE3_LOCAL_COMPILE", "1") == "1"
 
 
 # Global curriculum manager — shared between reward function and training loop

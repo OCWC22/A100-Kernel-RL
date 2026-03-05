@@ -7,7 +7,8 @@
 ![CUDA](https://img.shields.io/badge/CUDA-12.1-red?style=for-the-badge&logo=nvidia)
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.10-orange?style=for-the-badge&logo=pytorch)
 
-**Architectural Blueprint for Autonomous Hardware-Aware GPU Performance Engineering**
+**Autonomous Hardware-Aware GPU Performance Engineering**
+**Train on B200 | Evaluate on A100 | Target sm_80**
 
 [OpenEnv Hackathon SF • March 7-8, 2026](https://shack15.com) • [Live Demo](#demo) • [Paper](#documentation)
 
@@ -22,7 +23,8 @@ KernelForge-OpenEnv establishes a framework for **Artificial Expert Intelligence
 - **Hardware**: NVIDIA A100 (`sm_80`) by default (configurable)
 - **Speedup**: derived from live `profile_baselines` + `evaluate_kernel` outputs
 - **Correctness**: PAC-reasoning mathematical verification
-- **Training**: 3-stage RL pipeline with Qwen3-Coder-Next (80B/3B MoE)
+- **Training**: 3-stage RL pipeline on B200, all performance reward on A100 (Modal)
+- **Model**: Qwen3-Coder-Next (80B/3B MoE)
 
 ## 🏗️ Architecture
 

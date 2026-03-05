@@ -1,5 +1,11 @@
 # training/ — 3-Stage RL Pipeline
 
+## GPU Split
+
+> **B200** = model weights + generation + gradient updates + local nvcc compile checks (fast-fail).
+> **A100 (Modal)** = all performance reward (speedup timing, execution-based correctness, Nsight profiling).
+> B200 timing ≠ A100 timing. Never use B200 execution for performance reward.
+
 ## Model
 
 - **Primary**: Qwen/Qwen3-Coder-Next (80B MoE, 3B active, FP8 on B200 192GB)
@@ -59,9 +65,9 @@ Returns TRL-compatible `rollout_func(prompt_ids, ...) -> dict` with keys:
 `prompt_ids`, `completion_ids`, `logprobs`, `env_reward`
 
 ### Flow per completion:
-1. Generate response → `extract_cuda_code(text)` extracts ```cuda blocks
-2. `_evaluate_on_modal(code)` → compile + PAC verify + benchmark (5 graphs, 50 warmup, 30 runs)
-3. `_compute_reward_from_result(result)` → continuous log(speedup) + Nsight bonus
+1. Generate response on B200 → `extract_cuda_code(text)` extracts ```cuda blocks
+2. `_evaluate_on_modal(code)` → **A100 execution:** compile + correctness verify + benchmark (5 graphs, 50 warmup, 30 runs)
+3. `_compute_reward_from_result(result)` → 2-tier: fast path (log(speedup) from CUDA events), slow path (+ Nsight bonus for top-k)
 4. `_format_feedback(result, reward, turn)` → feedback text for next turn
 5. **Early exit** at reward >= 1.6 (log(5.0), i.e. 5x+ speedup)
 

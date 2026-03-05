@@ -1,5 +1,10 @@
 # openenv_env/ — OpenEnv Environment
 
+## GPU Split
+
+> All performance reward (speedup, correctness) executes on **A100 via Modal**. B200 only for local compile checks.
+> Judges call `step()` first — cache model on startup, warm CUDA context, pre-load tokenizer.
+
 ## OpenEnv Protocol
 
 - **NOT Gymnasium**. HTTP client-server protocol.
@@ -48,8 +53,9 @@ def compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile,
 
 | Return | Condition |
 |--------|-----------|
-| -1.0 | not compiled OR not correct |
-| log(speedup) + nsight_bonus | correct kernel (continuous signal) |
+| -1.0 | not compiled OR not execution-correct (compile-only is NOT sufficient) |
+| log(speedup) | fast path: CUDA events timing on A100 + execution correctness |
+| log(speedup) + nsight_bonus | slow path (top-k): + 0.4*occ + 0.3*mem + 0.2*warp from ncu |
 
 ```python
 def trloo_post_process(advantages: list[float], n: int) -> list[float]

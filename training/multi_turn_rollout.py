@@ -1,11 +1,13 @@
 """
 Multi-turn rollout for GRPOTrainer — the core agentic loop.
 
+GPU split: B200 generates completions (vLLM colocate). Modal A100 evaluates
+correctness + speedup for reward. Performance reward MUST run on A100 — B200
+timing would optimize for sm_100, not the target sm_80.
+
 Implements TRL's rollout_func pattern (docs: https://huggingface.co/docs/trl/main/en/openenv)
 following the Wordle multi-turn example: loop over turns, call generate_rollout_completions()
 per turn, step environment, accumulate token IDs + logprobs across turns.
-
-See docs/TRAINING_PLAN.md for full rationale and architecture.
 """
 from __future__ import annotations
 

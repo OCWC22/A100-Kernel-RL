@@ -1,7 +1,7 @@
 # KernelForge: Final Engineering PRD
 ## Single Source of Truth — Replaces ALL Previous Documents
 **Hackathon:** OpenEnv Hackathon SF — March 7-8, 2026 (SHACK15, San Francisco)
-**Training GPU:** NVIDIA B200 192GB | **Target Kernels:** NVIDIA A100 (sm_80)
+**Training GPU:** NVIDIA B200 192GB (model weights + generation) | **Eval GPU:** NVIDIA A100 via Modal (all performance rewards) | **Target Kernels:** NVIDIA A100 (sm_80)
 **Primary Model:** Qwen3-Coder-Next (80B MoE, 3B active, agentic RL-trained)
 **Last Updated:** March 4, 2026
 
@@ -11,12 +11,13 @@
 
 | Decision | Choice | Why |
 |----------|--------|-----|
-| Target GPU | A100 sm_80 | doubleGraph + CUDA Agent both target A100. Cross-compile on B200. |
-| Training GPU | B200 192GB | Qwen3-Coder-Next FP8 = ~100GB. 92GB free for sandbox. |
+| Target GPU | A100 sm_80 | doubleGraph + CUDA Agent both target A100. Cross-compile (`nvcc -arch=sm_80`) on B200, but **all performance measurement runs on A100** (Modal). B200 sm_100 timing ≠ A100 sm_80 timing — reward from B200 execution would push model away from A100-optimal code. |
+| Training GPU | B200 192GB | Qwen3-Coder-Next FP8 = ~100GB. 92GB free for sandbox. B200 handles: model weights, generation, gradient updates, local syntax/compile checks. |
+| Eval GPU | A100 via Modal | **Hard requirement:** any reward involving speedup/runtime MUST execute on A100. B200-only eval is limited to: compile check, symbol scan, static analysis. |
 | Primary model | Qwen3-Coder-Next FP8 | Trained on 800K executable tasks with agentic RL. 70.6% SWE-Bench. Tool calling native. 3B active = fast generation. |
 | Backup model | Qwen3.5-9B 4-bit | If Coder-Next fails to load. 81.7 GPQA Diamond. |
 | SkyDiscover LLM | GLM-5 via API ($1/M input) | Frontier 744B model for kernel evolution. ~$2-8/run. |
-| RL algorithm | TRLOO-augmented GRPO via TRL GRPOTrainer + stacked mitigations | MARS per-turn credit assignment + TRLOO post-process with N/(N-1) scaling (fixes Dr. Kernel 25% gradient shrinkage, arXiv 2510.15414 + 2602.05885). Nsight structured rewards + log(speedup) continuous signal replace discrete {-1,1,2,3} (fixes lazy optimization). CPPO pruning (arXiv 2503.22342) reduces eval cost 2-4x. MASPO soft trust region (arXiv 2602.17550). GRPO experimental 10 steps local-only; SkyDiscover/SFT remain primary hedges. See Section 6.0.4. |
+| RL algorithm | TRLOO-augmented GRPO via TRL GRPOTrainer + stacked mitigations | MARS per-turn credit assignment + TRLOO leave-one-out baseline (Dr. Kernel arXiv 2602.05885 derives N/(N-1) scaling; implement if derivation confirms, else vanilla GRPO first with tight gates). 2-tier reward: fast path (CUDA events timing on A100 + correctness + ptxas occupancy estimate) for most rollouts, slow path (Nsight ncu for top-k only). log(speedup) continuous signal replaces discrete {-1,1,2,3}. CPPO pruning (arXiv 2503.22342) reduces eval cost 2-4x. MASPO soft trust region (arXiv 2602.17550). GRPO experimental 10 steps; SkyDiscover/SFT remain primary hedges. See Section 6.0.4. |
 | Training pipeline | 3-stage: Warmup → RFT → GRPO | Pure RL collapses at step 17 (CUDA Agent Section 3.3). |
 | Environment spec | OpenEnv (step/reset/state) | Hackathon framework requirement. |
 | Kernel language | CUDA C++ | Aligns with CUDA Agent infra + doubleGraph patterns. |
@@ -27,10 +28,15 @@
 
 An RL training system + evolutionary search system that teaches Qwen3-Coder-Next to write optimized CUDA kernels for A100. Four components:
 
+> **B200 vs A100 Split (First Principles):** We train on B200 (model weights, generation, gradient updates) but **all performance reward must execute on A100** (via Modal). Cross-compiling `nvcc -arch=sm_80` on B200 is fine for syntax checking, but measuring runtime/occupancy/memory behavior on B200 (sm_100) would optimize for the wrong hardware. B200-only eval is limited to: compile check, symbol scan, `ptxas` static analysis. Any reward involving speedup, correctness verification, or Nsight profiling requires A100 execution.
+
 **Component 1: CUDA Agent Evaluation Pipeline** (ByteDance)
 - 6,000 PyTorch operator tasks (CUDA-Agent-Ops-6K dataset)
 - Compile → verify → profile scripts from their agent_workdir
-- Continuous reward function: log(speedup) + occupancy + coalescing (replacing discrete {-1, 1, 2, 3}). Floor baseline = torch.compile timing for Ops-6K tasks.
+- 2-tier continuous reward (all measured on A100 via Modal):
+  - **Fast path:** log(speedup) from CUDA events timing + execution-based correctness + ptxas occupancy estimate
+  - **Slow path (top-k only):** + Nsight ncu occupancy + mem_coalescing + warp_efficiency bonus
+  - Floor baseline = torch.compile timing for Ops-6K tasks
 - Anti-reward-hacking measures
 - Source: https://github.com/BytedTsinghua-SIA/CUDA-Agent
 
@@ -54,13 +60,16 @@ An RL training system + evolutionary search system that teaches Qwen3-Coder-Next
 **Component 4: GRPO Training** (our contribution)
 - 3-stage pipeline training Qwen3-Coder-Next 80B MoE (3B active) via Unsloth FP8 Dynamic on B200
 - Multi-turn with compiler feedback + MARS+TRLOO per-turn credit assignment
-- Nsight Compute structured rewards (occupancy, mem coalescing, warp efficiency) replacing discrete {-1,1,2,3}
+- **2-tier reward** (Nsight ncu is too slow for every rollout on single GPU — starves GRPO of samples):
+  - **Fast path (most rollouts):** CUDA events timing on A100 (Modal) + execution-based correctness + cheap static metrics (register count from `ptxas` output, shared mem usage, occupancy estimate from launch config)
+  - **Slow path (top-k candidates only):** Full Nsight ncu profiling on Modal A100 for detailed occupancy, mem coalescing, warp efficiency counters
 - CUDA-Agent SKILL.md verbatim + doubleGraph pattern paste as prompt context (transformation grammar deferred to v2)
-- Hybrid eval: local nvcc+PAC for early turns, Modal A100+ncu for final turn
+- Hybrid eval: B200 local nvcc compile check for fast-fail, Modal A100 for all performance + correctness reward
 - CPPO pruning (top-2 of G candidates after cheap structural filter)
 - MASPO soft trust region replacing hard PPO clip
 - OpenEnv-compatible environment, Unsloth + TRL on B200
-- **Strategy:** GRPO is experimental (10 steps, local nvcc eval only, no Modal). SkyDiscover + SFT are primary hedges. See GRPO_DEEP_DIVE sections GRPO-9 through GRPO-14 for stacked architecture (note: GRPO-13 transformation grammar deferred to v2).
+- **GPU split:** B200 handles model weights + generation + gradient updates + local compile checks. **A100 (Modal) handles all performance reward** — speedup timing, correctness verification, Nsight profiling. You cannot optimize A100 performance by measuring on B200 (different SM architecture, cache hierarchy, memory bandwidth).
+- **Strategy:** GRPO is experimental (10 steps). SkyDiscover + SFT are primary hedges. See GRPO_DEEP_DIVE sections GRPO-9 through GRPO-14 for stacked architecture (note: GRPO-13 transformation grammar deferred to v2).
 
 ---
 
@@ -224,9 +233,26 @@ pip install cupy-cuda12x
 nvidia-smi                    # B200, 192GB
 nvcc --version                # CUDA 12.x+
 python -c "import torch; print(torch.cuda.get_device_name())"
-python -c "import trl; print(trl.__version__)"  # ≥0.29.0
+python -c "import trl; print(trl.__version__)"  # ≥0.29.0 — PIN this version in pyproject.toml
 python -c "import unsloth; print('OK')"
 ```
+
+**Subtask 0.2.2b: TRL wiring smoke test (P0, 15 min)**
+```bash
+# Verify reward function signature matches what TRL actually passes.
+# TRL GRPO expects dataset column "prompt" (SINGULAR, not "prompts").
+# Standardize all dataset builders to use "prompt" column.
+python -c "
+from trl import GRPOConfig
+# Verify remove_unused_columns=False is supported
+config = GRPOConfig(output_dir='/tmp/test', remove_unused_columns=False, report_to='none')
+print('TRL config OK:', config.remove_unused_columns)
+"
+```
+
+**Subtask 0.2.2c: Context length — start conservative**
+
+Unsloth recommends smaller context for testing stability. Start with `max_seq_length=4096` (not 16384). Only increase after confirming no OOM and stable gradients at 4096.
 
 **Subtask 0.2.3: Verify sm_80 cross-compilation**
 ```bash
@@ -707,9 +733,13 @@ Key function: `compile_cuda(source: str, extra_flags: list) -> CompileResult`
 #### Task 3: `evaluation/verifier.py` — Correctness Checking
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Tasks 1, 2
 
-Check compiled .so for forbidden symbols via `nm -D`. Verify file exists and is non-trivial.
+**Execution-based correctness is mandatory (P0).** CUDABench (arXiv 2603.02236) explicitly reports "mismatch between high compilation success and low functional correctness" — compile success alone is a bad proxy that enables reward hacking (model learns minimal kernels that compile but produce garbage). Verification must:
+1. Check compiled .so for forbidden symbols via `nm -D`
+2. **Run kernel on 5+ randomized inputs on A100** (via Modal)
+3. **Compare outputs to PyTorch reference with tolerances** (rtol=1e-3, atol=1e-5 for fp32)
+4. Fail hard on NaN, OOB, shape mismatch
 
-For hackathon MVP: compilation + symbol check = "verified." Full I/O correctness checking (run kernel on 5 inputs, compare to reference) is a P1 upgrade.
+Compile-only verification scores r=-1 (same as compile failure). Only execution-verified correct kernels get positive reward.
 
 Key function: `verify_kernel(so_path: str, task_code: str) -> VerifyResult`
 
@@ -720,7 +750,7 @@ Key function: `verify_kernel(so_path: str, task_code: str) -> VerifyResult`
 #### Task 4: `evaluation/profiler.py` — Baseline Timing
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Task 1
 
-Profile torch.eager and torch.compile for a task. CUDA events, 50 warmup, 30 runs, trimmed mean. Runs in subprocess.
+Profile torch.eager and torch.compile for a task on **A100 (Modal)**. CUDA events, 50 warmup, 30 runs, trimmed mean. **Must run on A100 — B200 timings are for the wrong architecture.**
 
 Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` and `compile_ms`.
 
@@ -731,7 +761,13 @@ Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` an
 #### Task 5: `evaluation/reward.py` — GRPO Reward Function
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Tasks 1-4
 
-THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, compiles, verifies, returns continuous `log(speedup) + Nsight bonus` (see `openenv_env/reward.py`). TRLOO post-process with N/(N-1) scaling applied to advantages.
+THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, dispatches to Modal A100 for execution-based correctness + speedup timing.
+
+**2-tier reward architecture:**
+- **Fast path (all rollouts):** CUDA events timing on A100 + execution correctness + cheap static metrics (ptxas register count, shared mem, occupancy estimate). Returns `log(speedup_vs_eager)`.
+- **Slow path (top-k only):** Full Nsight ncu on A100 for occupancy, mem_coalescing, warp_efficiency. Adds `0.4*occ + 0.3*mem + 0.2*warp` bonus.
+
+TRLOO post-process: if Dr. Kernel derivation confirms N/(N-1) scaling, apply to advantages; otherwise run vanilla GRPO first with tight gates.
 
 Key function: `cuda_kernel_reward(completions, prompts=None, task_code=None, **kwargs) -> list[float]`
 
@@ -838,15 +874,17 @@ Three GRPOConfig objects for warmup / RFT / curriculum. All parameters specified
 ---
 
 #### Task 15-18: OpenEnv Wrapper
-**Priority:** P2 — build AFTER training works
+**Priority:** P0 — judges call `step()` first. Must be robust.
 **Time:** 2-3 hours
 **Depends on:** Tasks 1-5
 
 Wrap `evaluation/reward.py` in OpenEnv's `step()/reset()/state()` API. The core logic is identical — this is packaging.
 
+**Critical: `step()` must be robust even if model loading or GPU setup is slow.** Cache the model on startup, warm the CUDA context (dummy kernel launch), and pre-load tokenizer. If Modal is slow on first call, return a timeout-safe response rather than crashing.
+
 - Task 15: `models.py` — KernelAction, KernelObservation, StepOutcome Pydantic models
-- Task 16: `environment.py` — KernelForgeEnvironment(Environment) class
-- Task 17: `app.py` — FastAPI application
+- Task 16: `environment.py` — KernelForgeEnvironment(Environment) class (warm cache in `__init__`)
+- Task 17: `app.py` — FastAPI application (model + CUDA warmup in `@app.on_event("startup")`)
 - Task 18: Dockerfile for HF Spaces deployment
 
 ---
@@ -1358,7 +1396,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | **Thu 1PM-6PM** | 5 hrs | **P0 — Core pipeline:** Copy CUDA-Agent eval scripts verbatim into evaluation/. Wire continuous reward function (log(speedup) + occupancy + coalescing). Add TRLOO N/(N-1) post-process wrapper. Gate G-0.3. | 2 hr buffer |
 | **Thu 6PM-11PM** | 5 hrs | **P1 — SkyDiscover (parallel):** Set up evaluator on 5 seed .cu files. Launch 80-120 evolution runs. **P2 — SKILL.md:** Copy CUDA-Agent SKILL.md verbatim. Extract doubleGraph patterns into prompt context. | SkyDiscover runs overnight |
 | **Fri 9AM-1PM** | 4 hrs | **P2 — SFT warmup:** 50-example SFT via Unsloth built-in trainer. Verify >70% compile rate with local nvcc. Gate G-0.8: 5-step GRPO sanity check. | If compile rate <70%, extend SFT |
-| **Fri 1PM-5PM** | 4 hrs | **P3 — Optional GRPO:** 10-step GRPO with local-only eval (no Modal). Only if G-0.8 passes. | If GRPO stalls, SFT + SkyDiscover results are the submission |
+| **Fri 1PM-5PM** | 4 hrs | **P3 — Optional GRPO:** 10-step GRPO. B200 generates + updates weights; Modal A100 evaluates correctness + speedup for reward. Only if G-0.8 passes. | If GRPO stalls, SFT + SkyDiscover results are the submission |
 | **Sat 9AM** | 30 min | **Gate G-25**: compilation rate decision. Evaluate all tracks. | Decision tree in 6.6 |
 | **Sat 9:30AM-5PM** | 7.5 hrs | Collect best kernels from all tracks. OpenEnv wrapper. Run final eval suite. | SkyDiscover is the hedge |
 | **Sat 5PM-10PM** | 5 hrs | Results collection, demo, blog | 2 hr buffer |
