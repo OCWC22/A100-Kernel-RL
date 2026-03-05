@@ -19,15 +19,20 @@ def main():
     errors = []
     passed = 0
 
-    # 1. Reward computation (4 discrete tiers)
+    # 1. Reward computation (continuous log(speedup) + Nsight bonus)
     try:
-        from openenv_env.reward import compute_reward
-        assert compute_reward(False, False, 0, 0) == -1.0, "compile fail"
-        assert compute_reward(True, False, 0, 0) == -1.0, "verify fail"
-        assert compute_reward(True, True, 1.0, 0.9) == 1.0, "correct, no speedup"
-        assert compute_reward(True, True, 1.10, 0.9) == 2.0, "beats eager"
-        assert compute_reward(True, True, 1.10, 1.10) == 3.0, "beats both"
-        print("PASS: reward.compute_reward (5 assertions)")
+        import math
+        from openenv_env.reward import compute_reward, trloo_post_process
+        assert compute_reward(compiled=False, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "compile fail"
+        assert compute_reward(compiled=True, correct=False, speedup_vs_eager=0, speedup_vs_compile=0) == -1.0, "verify fail"
+        r = compute_reward(compiled=True, correct=True, speedup_vs_eager=1.0, speedup_vs_compile=0.9)
+        assert abs(r - 0.0) < 1e-6, f"correct, no speedup: expected 0.0, got {r}"
+        r = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=1.0)
+        assert abs(r - math.log(2.0)) < 1e-4, f"2x speedup: expected {math.log(2.0)}, got {r}"
+        # TRLOO post-process: N/(N-1) scaling
+        scaled = trloo_post_process([0.5, -0.3, 1.2, -0.8], n=4)
+        assert abs(scaled[0] - 0.5 * 4/3) < 1e-6, "TRLOO scaling"
+        print("PASS: reward.compute_reward + trloo_post_process (5 assertions)")
         passed += 1
     except Exception as e:
         errors.append(f"FAIL: reward - {e}")
@@ -107,7 +112,24 @@ def main():
     except Exception as e:
         errors.append(f"FAIL: curriculum - {e}")
 
-    # 7. PAC verification (graph invariants)
+    # 7. Multi-turn rollout helpers (CUDA extraction)
+    try:
+        from training.multi_turn_rollout import extract_cuda_code
+        # Fenced code block
+        cuda_block = "Here is the kernel:\n```cuda\n__global__ void add(float* a, float* b, int n) {}\n```\nDone."
+        code = extract_cuda_code(cuda_block)
+        assert "__global__" in code, f"Should extract fenced cuda: {code[:50]}"
+        # Raw __global__
+        raw = "__global__ void test(float* x) { x[0] = 1.0f; }"
+        assert extract_cuda_code(raw) == raw.strip()
+        # No code
+        assert extract_cuda_code("Just some text without CUDA") == ""
+        print("PASS: multi_turn_rollout.extract_cuda_code (3 assertions)")
+        passed += 1
+    except Exception as e:
+        errors.append(f"FAIL: multi_turn_rollout - {e}")
+
+    # 8. PAC verification (graph invariants)
     try:
         import networkx as nx
         from verification.pac_verify import verify_wcc, edges_to_csr
