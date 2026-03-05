@@ -74,7 +74,7 @@ kernelforge/
 │   ├── compiler.py                 # Task 2: nvcc -arch=sm_80 wrapper
 │   ├── verifier.py                 # Task 3: Correctness checking
 │   ├── profiler.py                 # Task 4: CUDA event timing
-│   ├── reward.py                   # Task 5: Discrete reward {-1,1,2,3}
+│   ├── reward.py                   # Task 5: Continuous Nsight + TRLOO reward
 │   └── antihack.py                 # Task 6: Forbidden symbol scanning
 │
 ├── data/
@@ -90,9 +90,9 @@ kernelforge/
 │   ├── run.py                      # Task 11: Main entry point (3-stage)
 │   ├── stage1_warmup.py            # Task 12: GRPO warmup config
 │   ├── stage2_rft.py               # Task 13: RFT filtering + SFT
-│   └── stage3_grpo.py              # Task 14: GRPO curriculum config
+│   └── stage3_grpo.py              # Task 14: GRPO curriculum (max 10 steps local-only)
 │
-├── openenv_wrapper/                # P2 — after training works
+├── openenv_wrapper/                # P0 — hackathon judges test step() first
 │   ├── __init__.py
 │   ├── models.py                   # Task 15: Pydantic models
 │   ├── environment.py              # Task 16: OpenEnv Environment class
@@ -429,20 +429,27 @@ def extract_graph_tasks(dgraph_path: str = "./doubleGraph") -> list[dict]:
 Profile cuGraph (baseline) vs doubleGraph (ceiling) for each graph algorithm.
 Produces a baselines file used for reward calibration.
 """
-import cugraph
-import cudf
 import time
 import json
 
+try:
+    import cugraph
+    import cudf
+    DOUBLEGRAPH_AVAILABLE = True
+except ImportError:
+    DOUBLEGRAPH_AVAILABLE = False
+
 def profile_graph_baselines(algorithms=None):
     """
-    Run graph algorithms with doubleGraph (which replaces cuGraph calls).
-    
-    NOTE: With doubleGraph installed, `import cugraph` uses the optimized
-    version. To get the ORIGINAL cuGraph timing, you'd need the unpatched
-    version. For hackathon, we profile doubleGraph as the ceiling and
-    estimate cuGraph as ~3.6x slower (the reported average speedup).
+    Profile cuGraph/doubleGraph baselines for reward calibration.
+
+    If doubleGraph wheel fails to install (B200 incompatible, A100/L4/A10G only),
+    skip live profiling and use documented 3.6x average speedup estimates from
+    docs/skills/doublegraph_a100.md patterns instead.
     """
+    if not DOUBLEGRAPH_AVAILABLE:
+        print("WARNING: doubleGraph not installed — using estimated 3.6x baselines from docs")
+        return _estimated_baselines()
     # Create a test graph (small — for quick profiling)
     import numpy as np
     n_vertices = 10000
@@ -487,6 +494,20 @@ def profile_graph_baselines(algorithms=None):
     
     print("Graph baselines saved to data/graph_baselines.json")
     return results
+
+def _estimated_baselines():
+    """Fallback when doubleGraph wheel is not installed (e.g. B200)."""
+    # Use documented 3.6x average speedup from doubleGraph paper
+    estimates = {
+        "pagerank": {"doublegraph_ms": None, "estimated_cugraph_ms": None, "speedup_estimate": 3.6},
+        "bfs": {"doublegraph_ms": None, "estimated_cugraph_ms": None, "speedup_estimate": 3.6},
+        "wcc": {"doublegraph_ms": None, "estimated_cugraph_ms": None, "speedup_estimate": 3.6},
+        "sssp": {"doublegraph_ms": None, "estimated_cugraph_ms": None, "speedup_estimate": 3.6},
+    }
+    with open("data/graph_baselines.json", "w") as f:
+        json.dump(estimates, f, indent=2)
+    print("Using estimated 3.6x baselines (doubleGraph not installed)")
+    return estimates
 ```
 
 **Done when:** `data/a100_patterns.md` exists with 5+ patterns. `graph_tasks.py` extracts tasks. Baseline profiling runs (or is skipped if doubleGraph not installed).
@@ -710,7 +731,7 @@ Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` an
 #### Task 5: `evaluation/reward.py` — GRPO Reward Function
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Tasks 1-4
 
-THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, compiles, verifies, returns {-1, 1, 2, 3}.
+THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, compiles, verifies, returns continuous `log(speedup) + Nsight bonus` (see `openenv_env/reward.py`). TRLOO post-process with N/(N-1) scaling applied to advantages.
 
 Key function: `cuda_kernel_reward(completions, prompts=None, task_code=None, **kwargs) -> list[float]`
 
@@ -1254,11 +1275,11 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 
 | # | Failure | Severity | Evidence | Mitigation |
 |---|---------|----------|----------|------------|
-| 1.1 | **Reward function is a stub** — `compute_reward()` referenced in `training/multi_turn_rollout.py:54` but NOT DEFINED. No correctness checking (GRPO_DEEP_DIVE line 339: "TODO"). No kernel profiling (line 368: placeholder `kernel_ms = compile_ms`). | CRITICAL | Code inspection: function imported but missing. GRPO_DEEP_DIVE lines 332-369. | **Gate 0.3**: Implement `compute_reward()` in `openenv_env/reward.py` BEFORE any training. 30 min task. The existing `reward.py` has the discrete {-1,1,2,3} skeleton (26 lines) — wire it to compilation result from Modal. |
+| 1.1 | **Reward function is a stub** — `compute_reward()` referenced in `training/multi_turn_rollout.py:54` but NOT DEFINED. No correctness checking (GRPO_DEEP_DIVE line 339: "TODO"). No kernel profiling (line 368: placeholder `kernel_ms = compile_ms`). | CRITICAL | Code inspection: function imported but missing. GRPO_DEEP_DIVE lines 332-369. | **Gate 0.3**: `openenv_env/reward.py` now implements continuous `log(speedup) + Nsight bonus` with `trloo_post_process()` (~60 lines). Wire to compilation result from Modal. |
 | 1.2 | **Modal is single point of failure** — every eval routes through `modal.Function.from_name()`. If Modal API is down/slow during hackathon, training halts. No local fallback. | CRITICAL | `training/multi_turn_rollout.py:35-51`. All GRPO steps call Modal. | Add local eval fallback: `nvcc -arch=sm_80` subprocess + `nm -D` symbol check. 45 min. Use Modal for profiling only; local for compile+verify. |
 | 1.3 | **60s subprocess timeout too aggressive** — compilation (10-30s) + correctness (5s) + profiling (20-60s) = 35-95s total. Timeout kills valid kernels. | HIGH | GRPO_DEEP_DIVE line 398: `timeout=60`. Profiling budget line 956: "20-60s". | Increase to `timeout=120`. Or split: compile timeout=30s, profile timeout=90s separately. |
 
-**Counter-argument (why it can still work):** CUDA Agent (arXiv 2602.24286) demonstrated 2.11x speedup using exactly this discrete reward scheme on their Ops-6K dataset. The reward function STRUCTURE is sound — it just needs the missing implementation wired up. The 26-line `openenv_env/reward.py` already has the right logic; it's the training pipeline's `compute_reward()` bridge that's missing.
+**Counter-argument (why it can still work):** CUDA Agent (arXiv 2602.24286) demonstrated 2.11x speedup using discrete rewards on Ops-6K. Our revised continuous `log(speedup) + Nsight bonus` (implemented in `openenv_env/reward.py`, ~60 lines) is strictly better — it provides gradient signal even between compilation milestones. `trloo_post_process()` fixes the Dr. Kernel gradient shrinkage.
 
 ---
 
@@ -1317,7 +1338,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 |------|------|------|---------------|-------------|
 | **G-0.1** | Wed night | Downloads complete | All 5 assets downloaded, checksums OK | Re-download overnight; if still failing, use backup model only |
 | **G-0.2** | Thu morning | B200 environment | `nvidia-smi` shows B200 192GB, `nvcc --version` >=12.x, `nvcc -arch=sm_80 test.cu` works | Fix CUDA install; if B200 unavailable, rent A100 from Lambda/RunPod |
-| **G-0.3** | Thu afternoon | Reward function works | `compute_reward(compiled=True, correct=True, speedup=1.5)` returns 2.0 | Implement missing function (30 min, BLOCKING) |
+| **G-0.3** | Thu afternoon | Reward function works | `compute_reward(compiled=True, correct=True, speedup_vs_eager=1.5, speedup_vs_compile=1.0)` returns `log(1.5) ≈ 0.405` | Implement missing function (30 min, BLOCKING) |
 | **G-0.5** | Thu night | SFT data generated | `data/sft_data.json` has >=50 compilable examples | Lower bar to 30; if API fails, use Ops-6K curated_200 as warmup data |
 | **G-0.6** | Fri morning | GRPOTrainer initializes | test_06 passes, no OOM, no API errors | Adapt to TRL API changes (read changelog) |
 | **G-0.7** | Fri afternoon | Full GRPO step works | test_08 completes: generate -> compile -> reward -> gradient update | Debug loop; if unfixable, fall back to SFT-only + SkyDiscover |
