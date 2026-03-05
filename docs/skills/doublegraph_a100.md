@@ -1,6 +1,3 @@
-<chatName="DoubleGraph A100 SKILLS.md"/>
-
-```markdown
 # SKILLS.md — DoubleGraph: Complete Engineering & Replication Guide
 
 > **Purpose:** This document is written for senior systems engineers, AI coding agents, and individual contributors. It explains, from absolute first principles and at a low technical level, exactly how DoubleGraph successfully replaces generic NVIDIA cuGraph algorithms with hyper-optimized, GPU-specific CUDA kernels. 
@@ -327,4 +324,3 @@ For systems engineers looking to adapt this approach to other domains (e.g., PyT
 2.  **The `.cu.flags` Sidecar Pattern:** Avoid polluting global `CMakeLists.txt` with compiler flags. Sidecars allow extreme micro-optimization (like setting `--maxrregcount=64` just for `sorensen_all_pairs.cu`).
 3.  **Template Hijacking:** You can rewrite the entire backend of a massive library without modifying its Python or Cython layers by precisely specializing its C++ templates and manipulating include guards.
 4.  **Static Tag LRU Caching:** Using `static int tag;` as a pointer reference into an LRU `CachePool` is a thread-safe, string-free, zero-overhead way to manage dynamic GPU resource lifetimes across disjoint API calls.
-```

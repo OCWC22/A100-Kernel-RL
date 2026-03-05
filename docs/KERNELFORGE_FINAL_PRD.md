@@ -36,10 +36,13 @@ An RL training system + evolutionary search system that teaches Qwen3-Coder-Next
 
 **Component 2: doubleGraph Expert Baselines** (doubleAI)
 - A100-optimized CUDA kernels for graph algorithms (3.6x avg speedup over cuGraph)
-- Graph algorithm tasks: PageRank, BFS, WCC, Louvain, cosine similarity
-- A100-specific optimization patterns: L2 pinning, cp.async, non-atomic compression
-- Reward calibration: cuGraph = floor, doubleGraph = ceiling
+- 4-layer drop-in architecture: Integration (C++ template hijacking via `#ifdef AAI_ROUTE_*`) → API Dispatch (4-way: base/seg/mask/seg_mask) → Infrastructure (`compact_graph_t` + `CachePool`) → Implementation (per-GPU `.cu` files + `.cu.flags` sidecars)
+- Core algorithms: BFS (dual-frontier direction-optimizing), Louvain (3-tier adaptive dispatch), PageRank (fused SpMV with warp-level reduction), WCC (parallel union-find), Triangle Count (DAG orientation + bilateral intersection)
+- Key A100 (SM80) patterns: degree-based 4-bin segmentation (≥1024/32-1023/1-31/0), thread-local LRU `CachePool` (capacity=8, type-erased via `Cacheable`), `__ballot_sync` warp aggregation, shared-memory hash tables with `atomicCAS`, `cudaHostAllocMapped` zero-copy convergence
+- Hard constraints: single GPU only, int32 only, no DCS/hypersparse, Stream 0 execution, no hot-path error checking
+- Reward calibration: cuGraph baseline timing = floor (reward 1), doubleGraph expert timing = ceiling (reward 3), per-algorithm thresholds from profiling
 - Source: https://github.com/double-ai/doubleGraph
+- Full engineering reference: `docs/skills/doublegraph_a100.md` (11-section deep dive)
 
 **Component 3: SkyDiscover Evolutionary Search** (UC Berkeley)
 - AdaEvolve + EvoX for kernel evolution via GLM-5 API
@@ -291,39 +294,72 @@ Write a short note:
 **Time:** 2 hours
 
 **Subtask 0.4.1: Survey the A100 kernel directory**
+
+Expected directory structure (from `docs/skills/doublegraph_a100.md`):
+```
+doubleGraph/cpp/src/aai/impl/a100/
+├── traversal/           # BFS (bfs.cu + dispatch variants)
+├── community/           # Louvain (louvain_f32.cu), Triangle Count (triangle_count.cu)
+├── link_analysis/       # PageRank (pagerank.cu)
+├── components/          # WCC (weakly_connected_components.cu)
+├── link_prediction/     # Cosine similarity, etc.
+└── *.cu.flags           # Per-kernel sidecar compiler flags
+```
+
 ```bash
 # Count kernels per algorithm category
 for dir in doubleGraph/cpp/src/aai/impl/a100/*/; do
     count=$(find "$dir" -name "*.cu" | wc -l)
     echo "$(basename $dir): $count kernels"
 done
+
+# Also count .cu.flags sidecars
+find doubleGraph/cpp/src/aai/impl/a100/ -name "*.cu.flags" | wc -l
 ```
 
 **Subtask 0.4.2: Extract optimization patterns into a100_patterns.md**
 
-Read these specific files (highlighted in the WarpSpeed blog):
+Read the 5 primary A100 kernel files (see `docs/skills/doublegraph_a100.md` for full architecture):
 ```bash
-# WCC with non-atomic path compression + L2 pinning (17x speedup)
-cat doubleGraph/cpp/src/aai/impl/a100/components/weakly_connected_components_seg_mask.cu
+# BFS: Direction-optimizing with dual frontiers, __ballot_sync warp aggregation
+cat doubleGraph/cpp/src/aai/impl/a100/traversal/bfs.cu
 
-# Cosine similarity with galloping merge + adaptive routing (4x speedup)
-cat doubleGraph/cpp/src/aai/impl/a100/link_prediction/cosine_all_pairs_f64_seg.cu
+# WCC: Parallel union-find with hook-sample/compress/hook-full, zero-copy convergence
+cat doubleGraph/cpp/src/aai/impl/a100/components/weakly_connected_components.cu
 
-# PageRank with SpMV-based approach
-cat doubleGraph/cpp/src/aai/impl/a100/centrality/  # find pagerank files
+# PageRank: Fused SpMV with warp-level __shfl_down_sync reduction
+cat doubleGraph/cpp/src/aai/impl/a100/link_analysis/pagerank.cu
 
-# Louvain with 3-tier dispatch
-cat doubleGraph/cpp/src/aai/impl/a100/community/    # find louvain files
+# Louvain: 3-tier dispatch (serial / thread-per-vertex / warp-per-vertex shared-mem hash)
+cat doubleGraph/cpp/src/aai/impl/a100/community/louvain_f32.cu
+
+# Triangle Count: DAG orientation + bilateral set intersection with __ldg() prefetch
+cat doubleGraph/cpp/src/aai/impl/a100/community/triangle_count.cu
 ```
 
-Create `data/a100_patterns.md` with 5-10 code snippets showing:
-- L2 cache pinning (`cudaAccessPolicyWindow`)
-- cp.async pipelining (`cuda::memcpy_async`)
-- Non-atomic path compression (provably harmless data races)
-- Galloping merge (exponential search for sorted intersection)
-- Warp-cooperative output with `__ballot_sync`
-- Per-vertex adaptive routing (hash table vs sort-merge)
-- Cooperative kernels with `cg::this_grid().sync()`
+Also read the infrastructure headers:
+```bash
+# compact_graph_t: CSR/CSC struct with degree-based 4-bin segmentation
+cat doubleGraph/cpp/include/cugraph/aai/compact_graph.hpp
+
+# CachePool: Thread-local LRU GPU memory reuse (capacity=8)
+cat doubleGraph/cpp/include/cugraph/aai/cache_pool.hpp
+
+# Check .cu.flags sidecars for per-kernel compiler flags
+find doubleGraph/cpp/src/aai/impl/a100/ -name "*.cu.flags" -exec echo "=== {} ===" \; -exec cat {} \;
+```
+
+Create `data/a100_patterns.md` with code snippets showing:
+- Degree-based 4-bin segmentation (High ≥1024, Mid 32-1023, Low 1-31, Isolated 0)
+- 4-way dispatch pattern (base/seg/mask/seg_mask) — eliminates warp divergence at host level
+- `__ballot_sync` warp-level atomic aggregation (BFS frontier expansion)
+- Shared-memory hash tables with `atomicCAS` + linear probing (Louvain Tier 3, 128 entries)
+- Warp-level `__shfl_down_sync` reduction for convergence checking (PageRank L1 norm)
+- Parallel union-find with path-halving: `parent[v] = parent[parent[v]]` (WCC)
+- Zero-copy convergence via `cudaHostAllocMapped` (WCC)
+- DAG orientation + bilateral set intersection with `__ldg()` prefetch (Triangle Count)
+- `CachePool` thread-local LRU pattern (`static int tag;` + `Cacheable` base class)
+- `.cu.flags` sidecar per-kernel compiler flags (`--maxrregcount`, `--use_fast_math`, `--rdc=true`)
 
 These get pasted into the SKILL.md prompt that the model sees.
 
@@ -828,19 +864,50 @@ echo "All evolution jobs launched. Check results/skydiscover/"
 
 #### Task 22-24: doubleGraph Integration
 **Priority:** P1 — expert baselines + graph tasks
-**Time:** 2 hours
-**Depends on:** Task 0.4
+**Time:** 3 hours
+**Depends on:** Task 0.4, `docs/skills/doublegraph_a100.md` (SKILLS.md reference)
 
-**Task 22:** `extract_patterns.py` — Extract A100 patterns to `a100_patterns.md` (done in Task 0.4.2)
+**Task 22:** `extract_patterns.py` — Extract A100 Patterns from DoubleGraph
+- Parse the 4-layer architecture from the source tree:
+  - Layer 4 (Integration): `cpp/src/aai/integration/` — template specialization with `#ifdef AAI_ROUTE_*`
+  - Layer 3 (API Dispatch): `cpp/include/cugraph/aai/api/` — 4-way dispatch declarations
+  - Layer 2 (Infrastructure): `cpp/include/cugraph/aai/` — `compact_graph_t`, `CachePool`
+  - Layer 1 (Implementation): `cpp/src/aai/impl/a100/` — the `.cu` kernel files
+- Extract code snippets for `data/a100_patterns.md`:
+  - `compact_graph_t` struct with `segment_offsets` (degree-based 4-bin segmentation)
+  - `CachePool` acquire/ensure pattern with `static int tag;`
+  - 4-way dispatch host-side branching (base/seg/mask/seg_mask)
+  - Per-algorithm A100 optimizations (see SKILLS.md Sections 6.1-6.5)
+- Parse `.cu.flags` sidecar files to document per-kernel compiler flag patterns
+- Identify RDC kernels (cooperative launches) separated into `cugraph_aai_rdc` static library
 
-**Task 23:** `graph_tasks.py` — Format graph tasks for the environment (done in Task 0.4.3)
+**Task 23:** `graph_tasks.py` — Format Graph Algorithm Tasks
+- Create task definitions for 5 primary algorithms:
+  - BFS (`traversal/bfs.cu`) — dual-frontier direction-optimizing
+  - Louvain (`community/louvain_f32.cu`) — 3-tier adaptive dispatch
+  - PageRank (`link_analysis/pagerank.cu`) — fused SpMV with warp reduction
+  - WCC (`components/weakly_connected_components.cu`) — parallel union-find
+  - Triangle Count (`community/triangle_count.cu`) — DAG orientation
+- Each task includes: `expert_cuda` (the `.cu` source), algorithm category, dispatch variant
+- Include `.cu.flags` content for each kernel (`--maxrregcount`, `--use_fast_math`, `--rdc=true`)
 
-**Task 24:** `baseline_profiler.py` — Profile cuGraph vs doubleGraph (done in Task 0.4.4)
+**Task 24:** `baseline_profiler.py` — Profile cuGraph vs doubleGraph Baselines
+- Profile all 5 primary algorithms on test graphs of varying sizes
+- Record per-algorithm speedup (not just the 3.6x average — speedups vary widely per algorithm)
+- Test both masked and unmasked dispatch variants
+- Store results for per-algorithm reward calibration:
+  - cuGraph timing = floor, doubleGraph timing = ceiling
+  - Handle doubleGraph-replaces-cuGraph issue: if doubleGraph is installed, `import cugraph` uses optimized version; profile doubleGraph directly and estimate cuGraph from known per-algorithm speedup ratios
 
 These feed into:
 - `data/loader.py` (Task 7) — adds graph tasks alongside dense ops
-- `data/skill_a100.md` (Task 9) — includes doubleGraph patterns
-- `evaluation/reward.py` (Task 5) — graph tasks use different reward calibration
+- `data/skill_a100.md` (Task 9) — includes doubleGraph patterns from `a100_patterns.md`
+- `evaluation/reward.py` (Task 5) — graph tasks use per-algorithm reward calibration:
+  - r = -1: compilation fails OR correctness fails
+  - r = +1: correct but slower than cuGraph baseline
+  - r = +2: faster than cuGraph baseline
+  - r = +3: within 10% of doubleGraph expert kernel timing
+  - Per-algorithm thresholds computed from Task 24 profiling results
 
 ---
 

@@ -136,7 +136,7 @@ Effective GRPO memory = 1 model + LoRA adapters + optimizer states
 
 ## GRPO-2: B200 192GB Memory Budget (Exact)
 
-### Model: Qwen3.5-35B-A3B (MoE, 3B active per token)
+### Model: Qwen3.5-35B-A3B (MoE, 3B active per token) — BACKUP SCENARIO
 
 ```
 B200 Total VRAM: 192 GB
@@ -179,7 +179,7 @@ TOTAL                              ~12.5 GB
 REMAINING                          ~179.5 GB
 ```
 
-### Model: Qwen3-Coder-Next (80B MoE, 3B active)
+### Model: Qwen3-Coder-Next (80B MoE, 3B active) — PRIMARY MODEL
 
 ```
 COMPONENT                          MEMORY
@@ -475,7 +475,7 @@ Runs on B200 192GB. Targets A100 sm_80 kernels.
 
 Usage:
     python training/run_all_stages.py \
-        --model Qwen/Qwen3.5-35B-A3B \
+        --model unsloth/Qwen3-Coder-Next-FP8-Dynamic \
         --output_dir ./checkpoints \
         --stage all
 
@@ -534,9 +534,8 @@ def run_stage1(model, tokenizer, output_dir: str):
         
         # Generation
         max_completion_length=4096,   # CUDA kernels are 50-300 lines
-        temperature=0.9,              # HIGH for exploration in Stage 1
-        # Higher temperature = more diverse completions = more reward variance
-        # More variance = stronger learning signal in GRPO
+        temperature=1.0,              # Qwen3-Coder-Next trained at 1.0 — do not lower
+        # Matches Qwen3-Coder-Next's training temperature. Higher = more diverse = stronger GRPO signal.
         
         # Training
         per_device_train_batch_size=1, # 1 prompt per step
@@ -545,7 +544,7 @@ def run_stage1(model, tokenizer, output_dir: str):
         # Effective batch for gradient = 16 completions
         num_train_epochs=1,
         max_steps=300,                # Stage 1 budget
-        learning_rate=3e-6,           # Conservative (prevent catastrophic forgetting)
+        learning_rate=2e-6,           # Conservative — preserve Qwen3-Coder-Next capabilities
         
         # Precision
         bf16=True,                    # BF16 training on B200
@@ -668,14 +667,14 @@ def run_stage3(model, tokenizer, output_dir: str):
         
         # Generation — lower temperature for exploitation
         max_completion_length=4096,
-        temperature=0.7,   # Lower than Stage 1 — exploit learned patterns
+        temperature=1.0,   # Match Qwen3-Coder-Next training temperature
         
         # Training
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         num_train_epochs=1,
         max_steps=200,
-        learning_rate=5e-6,  # Slightly higher than Stage 1
+        learning_rate=3e-6,  # Slightly higher than Stage 1 — matches PRD table
         
         bf16=True,
         gradient_checkpointing=True,
@@ -719,7 +718,7 @@ def collect_trajectories(model, tokenizer, dataset, n: int = 100) -> list:
             outputs = model.generate(
                 **inputs,
                 max_new_tokens=4096,
-                temperature=0.7,
+                temperature=1.0,
                 do_sample=True,
             )
         
@@ -752,7 +751,7 @@ def collect_trajectories(model, tokenizer, dataset, n: int = 100) -> list:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="Qwen/Qwen3.5-35B-A3B")
+    parser.add_argument("--model", default="unsloth/Qwen3-Coder-Next-FP8-Dynamic")
     parser.add_argument("--output_dir", default="./checkpoints")
     parser.add_argument("--stage", default="all", 
                         choices=["1", "2", "3", "all"])
@@ -1125,8 +1124,8 @@ OUR CONFIGURATION:
   β = 0.0 (no KL penalty, DAPO style)
   ε = 0.2 (clip range)
   Rewards = {-1, 1, 2, 3} (CUDA Agent Equation 1)
-  Temperature = 0.9 (Stage 1) → 0.7 (Stage 3)
-  Learning rate = 3e-6 (Stage 1) → 5e-6 (Stage 3)
+  Temperature = 1.0 (Stage 1) → 1.0 (Stage 3)
+  Learning rate = 2e-6 (Stage 1) → 3e-6 (Stage 3)
   LoRA rank = 16, target = qkvo + gate/up/down
 
 B200 MEMORY:
