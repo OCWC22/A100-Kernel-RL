@@ -4,7 +4,7 @@
 
 | File | Lines | Size | Content |
 |------|-------|------|---------|
-| `KERNELFORGE_FINAL_PRD.md` | 1,433 | 79KB | Single source of truth — replaces all previous docs |
+| `KERNELFORGE_FINAL_PRD.md` | 1,452 | 80KB | Single source of truth — replaces all previous docs |
 | `GRPO_DEEP_DIVE.md` | 2,078 | 81KB | Algorithm math, memory budgets, stacked mitigations |
 
 ## PRD Section Map (`KERNELFORGE_FINAL_PRD.md`)
@@ -15,18 +15,18 @@
 | 1 | 27 | What We're Building |
 | 2 | 76 | Repository Structure |
 | 3 | 148 | Complete Task List (Phases 0-3) |
-| 4 | 1051 | Critical Path |
-| 5 | 1079 | All Links |
-| 6 | 1157 | Risk Matrix & Mitigations |
-| 6.0 | 1176 | Fundamental Research Risks |
-| 6.1 | 1325 | CUDA Agent Evaluation Pipeline Failures |
-| 6.2 | 1337 | doubleGraph Expert Baselines Failures |
-| 6.3 | 1349 | SkyDiscover Evolutionary Search Failures |
-| 6.4 | 1361 | GRPO Training Failures |
-| 6.5 | 1375 | Cross-Component Integration Risks |
-| 6.6 | 1386 | Decision Gates (Go/No-Go) |
-| 6.7 | 1401 | Realistic Timeline (with failure buffer) |
-| 6.8 | 1423 | Minimum Viable Submission |
+| 4 | 1070 | Critical Path |
+| 5 | 1098 | All Links |
+| 6 | 1176 | Risk Matrix & Mitigations |
+| 6.0 | 1195 | Fundamental Research Risks |
+| 6.1 | 1344 | CUDA Agent Evaluation Pipeline Failures |
+| 6.2 | 1356 | doubleGraph Expert Baselines Failures |
+| 6.3 | 1368 | SkyDiscover Evolutionary Search Failures |
+| 6.4 | 1380 | GRPO Training Failures |
+| 6.5 | 1394 | Cross-Component Integration Risks |
+| 6.6 | 1405 | Decision Gates (Go/No-Go) |
+| 6.7 | 1420 | Realistic Timeline (with failure buffer) |
+| 6.8 | 1442 | Minimum Viable Submission |
 
 ## GRPO Deep Dive Section Map (`GRPO_DEEP_DIVE.md`)
 
