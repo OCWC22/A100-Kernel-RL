@@ -71,7 +71,7 @@ Returns TRL-compatible `rollout_func(prompt_ids, ...) -> dict` with keys:
 4. `_format_feedback(result, reward, turn)` → feedback text for next turn
 5. **Early exit** at reward >= 1.6 (log(5.0), i.e. 5x+ speedup)
 
-### `reward_from_env(completions, **kwargs) -> list[float]`
+### `reward_from_env(prompts, completions, **kwargs) -> list[float]`
 Single-turn wrapper for Stage 1.
 
 ## RFT Filter (`rft_filter.py`)
@@ -95,11 +95,11 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 
 | Technique | Deep Dive Ref | File to Create |
 |-----------|---------------|----------------|
-| MARS+TRLOO credit assignment | GRPO-4 line 1171 | `custom_grpo_loop.py` |
-| Nsight structured rewards | GRPO-9 line 1619 | `hybrid_rollout.py` |
-| CPPO completion pruning | GRPO-11 line 1758 | (in custom_grpo_loop.py) |
-| MASPO soft trust region | GRPO-12 line 1801 | `maspo_loss.py` |
-| ~~Transformation grammar~~ | GRPO-13 line 1845 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
+| MARS+TRLOO credit assignment | GRPO-4 line 1174 | `custom_grpo_loop.py` |
+| Nsight structured rewards | GRPO-9 line 1626 | `hybrid_rollout.py` |
+| CPPO completion pruning | GRPO-11 line 1765 | (in custom_grpo_loop.py) |
+| MASPO soft trust region | GRPO-12 line 1808 | `maspo_loss.py` |
+| ~~Transformation grammar~~ | GRPO-13 line 1852 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
 
 ## Files to Create
 
@@ -117,9 +117,9 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 
 ## Deep Dive Pointers
 
-- Quick reference card: `GRPO_DEEP_DIVE.md` line 1569 (GRPO-8)
-- Full stacked architecture: `GRPO_DEEP_DIVE.md` line 1974 (GRPO-14)
-- Monitor checklist: `GRPO_DEEP_DIVE.md` line 1446 (GRPO-6)
+- Quick reference card: `GRPO_DEEP_DIVE.md` line 1576 (GRPO-8)
+- Full stacked architecture: `GRPO_DEEP_DIVE.md` line 1981 (GRPO-14)
+- Monitor checklist: `GRPO_DEEP_DIVE.md` line 1449 (GRPO-6)
 
 
 <claude-mem-context>
