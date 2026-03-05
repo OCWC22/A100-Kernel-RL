@@ -1033,3 +1033,126 @@ SHIP (Saturday night):
 | OpenEnv Docs | https://meta-pytorch.org/OpenEnv/ |
 | GLM-5 API | https://api.z.ai |
 | SkyDiscover Blog | https://skydiscover-ai.github.io/ |
+
+---
+
+## 6. Risk Matrix & Mitigations
+
+### Codebase Reality Check
+
+| Layer | Status | LoC | Notes |
+|-------|--------|-----|-------|
+| OpenEnv environment | Complete | ~600 | Full step/reset/state contract, tested |
+| Training pipeline | Skeletal | ~1,150 | Scaffolding exists, depends on Modal backend |
+| Evaluation + Verification | Mostly complete | ~1,260 | PAC verify + profiling work, reward bridge missing |
+| CUDA kernels | Minimal | ~670 | WCC only (3 variants). No BFS/PageRank/Louvain. |
+| Datasets | Complete | ~1,300 | 6,200 tasks pre-generated and formatted |
+| SkyDiscover integration | Not implemented | 0 | Directory doesn't exist |
+| doubleGraph integration | Not implemented | 0 | Directory doesn't exist; docs only |
+| `training/grpo_train.py` | Missing | 0 | Referenced in pyproject.toml + README but doesn't exist |
+
+**Bottom line:** ~70% of infrastructure exists. The training pipeline assumes an external Modal deployment. Two of four components have zero code.
+
+---
+
+### 6.1 Component 1: CUDA Agent Evaluation Pipeline — Top 3 Failures
+
+| # | Failure | Severity | Evidence | Mitigation |
+|---|---------|----------|----------|------------|
+| 1.1 | **Reward function is a stub** — `compute_reward()` referenced in `training/multi_turn_rollout.py:54` but NOT DEFINED. No correctness checking (GRPO_DEEP_DIVE line 339: "TODO"). No kernel profiling (line 368: placeholder `kernel_ms = compile_ms`). | CRITICAL | Code inspection: function imported but missing. GRPO_DEEP_DIVE lines 332-369. | **Gate 0.3**: Implement `compute_reward()` in `openenv_env/reward.py` BEFORE any training. 30 min task. The existing `reward.py` has the discrete {-1,1,2,3} skeleton (26 lines) — wire it to compilation result from Modal. |
+| 1.2 | **Modal is single point of failure** — every eval routes through `modal.Function.from_name()`. If Modal API is down/slow during hackathon, training halts. No local fallback. | CRITICAL | `training/multi_turn_rollout.py:35-51`. All GRPO steps call Modal. | Add local eval fallback: `nvcc -arch=sm_80` subprocess + `nm -D` symbol check. 45 min. Use Modal for profiling only; local for compile+verify. |
+| 1.3 | **60s subprocess timeout too aggressive** — compilation (10-30s) + correctness (5s) + profiling (20-60s) = 35-95s total. Timeout kills valid kernels. | HIGH | GRPO_DEEP_DIVE line 398: `timeout=60`. Profiling budget line 956: "20-60s". | Increase to `timeout=120`. Or split: compile timeout=30s, profile timeout=90s separately. |
+
+**Counter-argument (why it can still work):** CUDA Agent (arXiv 2602.24286) demonstrated 2.11x speedup using exactly this discrete reward scheme on their Ops-6K dataset. The reward function STRUCTURE is sound — it just needs the missing implementation wired up. The 26-line `openenv_env/reward.py` already has the right logic; it's the training pipeline's `compute_reward()` bridge that's missing.
+
+---
+
+### 6.2 Component 2: doubleGraph Expert Baselines — Top 3 Failures
+
+| # | Failure | Severity | Evidence | Mitigation |
+|---|---------|----------|----------|------------|
+| 2.1 | **Zero integration code exists** — Tasks 22-24 are pseudocode in this PRD. No `doublegraph_integration/` directory. No `extract_patterns.py`, `graph_tasks.py`, `baseline_profiler.py`. | HIGH | Codebase scan: directory doesn't exist. | Demote to P2. Use doubleGraph docs (`docs/skills/doublegraph_a100.md`) as prompt context only — no runtime dependency. Extract patterns manually into `data/a100_patterns.md` as static file. 1 hour. |
+| 2.2 | **Wheel may not install on B200** — Task 0.1.5 is a placeholder (`wget [A100_WHEEL_URL]`). No actual URL. Cross-GPU wheel compatibility unverified. | HIGH | Section 3, Task 0.1.5: placeholder URL. Task 0.2.4: "If this fails: stretch goal." | Accept this risk. If wheel fails, skip. The 330-line SKILLS.md provides enough pattern context for prompts WITHOUT runtime doubleGraph. |
+| 2.3 | **Only WCC kernels exist in repo** — `kernels/` has 3 WCC variants. No BFS, Louvain, PageRank, Triangle Count. The "5 primary algorithms" coverage is aspirational. | MEDIUM | `kernels/`: `baseline_wcc.cu`, `ecl_cc_h100.cu`, `clustered_wcc_h100.cu`. Nothing else. | Focus hackathon on WCC + Ops-6K dense operators (6,000 tasks in dataset). Graph algo breadth is stretch goal. |
+
+**Counter-argument:** doubleGraph's primary value is as **prompt context**, not runtime dependency. The 330-line `docs/skills/doublegraph_a100.md` contains all A100 optimization patterns (4-bin segmentation, CachePool, `__ballot_sync`, shared-mem hash tables). These get pasted into SKILL.md — the model sees the patterns regardless of whether doubleGraph wheels install. WarpSpeed research (doubleai.com) validates the 3.6x claim; we cite it, we don't need to reproduce it.
+
+---
+
+### 6.3 Component 3: SkyDiscover Evolutionary Search — Top 3 Failures
+
+| # | Failure | Severity | Evidence | Mitigation |
+|---|---------|----------|----------|------------|
+| 3.1 | **Zero implementation exists** — no `skydiscover_integration/` directory, no evaluator, no launch script, no seed kernels. | HIGH | Codebase scan: directory doesn't exist. | Create minimal integration: 1 evaluator file (reuse `openenv_env/reward.py`), 1 launch script, 3 seed kernels. 2 hours total. OR skip entirely and use GRPO results for demo. |
+| 3.2 | **GLM-5 API not configured** — no API key setup, no pyproject.toml dependency, no test of API endpoint. Cost estimate ($2-8/run) is unvalidated. | MEDIUM | No code references GLM-5 API client. Section 0, Locked Decisions just names the price. | Register for GLM-5 API key Wednesday. Test with 1 call. If API unavailable, substitute any OpenAI-compatible endpoint (Claude, GPT-4). AdaEvolve (arXiv 2602.20133) is model-agnostic. |
+| 3.3 | **VRAM contention** — Section 1 says "parallel track: runs while GRPO trains" but both compete for B200 GPU. | MEDIUM | Section 1, Component 3. No resource isolation in code. | Run SkyDiscover on a SEPARATE machine or Modal instance. It only needs nvcc + API calls, not 192GB VRAM. Or run sequentially: SkyDiscover first (2-3 hrs), then GRPO. |
+
+**Counter-argument:** AdaEvolve (arXiv 2602.20133) demonstrated 10-40% gains over compiler baselines with 80-120 LLM calls. EvoX (arXiv 2602.23413) adds meta-evolution that automatically discovers optimization tactics. The framework is proven — the risk is purely implementation time, not algorithmic soundness. Even a minimal 10-iteration run produces demo-worthy results.
+
+---
+
+### 6.4 Component 4: GRPO Training — Top 3 Failures
+
+| # | Failure | Severity | Evidence | Mitigation |
+|---|---------|----------|----------|------------|
+| 4.1 | **Memory budget unverified** — FP8 (~85GB) + LoRA (0.2GB) + optimizer (3GB) + KV cache (12GB) + activations = ~100GB estimated. No actual B200 measurement. Gradient checkpointing + GRPO interaction untested. | CRITICAL | GRPO_DEEP_DIVE lines 182-193. Estimates only, no benchmarks. | **Gate G-0.2**: Run `nvidia-smi` during model load + single GRPO step. If OOM: (a) reduce max_seq_length 8192->4096, (b) reduce G=4->2, (c) switch to 4-bit quantization, (d) use backup Qwen3.5-9B (18GB). Decision ladder, not binary. |
+| 4.2 | **TRL GRPOTrainer API compatibility** — `rollout_func` parameter is experimental. `reward_funcs` vs `reward_func` naming uncertain. `remove_unused_columns=False` behavior unverified with TRL >=0.29. | HIGH | GRPO_DEEP_DIVE line 566 (`reward_funcs`), line 1080 (`remove_unused_columns`). | **Gate G-0.6**: `test_06_grpo_init.py` — initialize GRPOTrainer with our config, verify no crash. 15 min. If API changed: read TRL 0.29 changelog, adapt. The core GRPO math is model-agnostic; only the TRL wrapper changes. |
+| 4.3 | **G=4 + low compilation rate = zero-gradient steps** — if base model compiles <30% of CUDA, P(all 4 fail) > 24%. Those steps produce std(r)=0 -> advantage=0 -> no learning. | HIGH | GRPO_DEEP_DIVE line 73 (edge case), lines 1095-1110 (math). No empirical compilation rate for Qwen3-Coder-Next. | **Gate G-25** (Saturday morning): test_07 measures compilation rate. If <50%: extend Stage 1 warmup. If <30%: switch model. CUDA Agent (arXiv 2602.24286, Section 3.3) shows 3-stage pipeline prevents step-17 collapse — our warmup follows their protocol. |
+
+**Counter-argument:** GRPO (arXiv 2402.03300, DeepSeekMath) has been validated in multiple domains. The "step-17 collapse" from CUDA Agent Section 3.3 is specifically for PURE RL without warmup — our 3-stage pipeline addresses this. Qwen3-Coder-Next (arXiv 2603.00729) was trained on 800K executable code tasks with agentic RL, giving it strong baseline CUDA familiarity. Temperature=1.0 matches its training distribution. The risk is real but bounded by our decision gates.
+
+---
+
+### 6.5 Cross-Component Integration Risks
+
+| # | Integration Point | Risk | Mitigation |
+|---|-------------------|------|------------|
+| I.1 | GRPO reward -> Modal eval -> nvcc compile | If Modal latency >30s/call, each GRPO step takes 5+ min. 100 steps = 8+ hours. | Add local compile-only fast path. Use Modal only for profiling. Reduces per-step from 2-5 min to 30-60s for compile-only reward. |
+| I.2 | Ops-6K dataset -> prompt formatting -> model generation | Dataset format assumes `ops`, `data_source`, `code` fields. If HF dataset updated, parsing breaks. | Pin dataset version. `training/cuda_agent_integration.py:66` already loads from HF — add `revision="main"` pin. |
+| I.3 | SkyDiscover parallel + GRPO sequential | Both assume GPU access. No resource scheduler. | Run on separate machines. SkyDiscover needs only nvcc (CPU-heavy, API calls). GRPO needs GPU. |
+| I.4 | `grpo_train.py` entry point missing | Referenced in README and pyproject.toml (`kernelforge-train`) but file doesn't exist. Training can't start. | Create `training/grpo_train.py` that orchestrates stage1->stage2->stage3. 1 hour. |
+
+---
+
+### 6.6 Decision Gates (Go/No-Go Checkpoints)
+
+| Gate | When | Test | Pass Criteria | Fail Action |
+|------|------|------|---------------|-------------|
+| **G-0.1** | Wed night | Downloads complete | All 5 assets downloaded, checksums OK | Re-download overnight; if still failing, use backup model only |
+| **G-0.2** | Thu morning | B200 environment | `nvidia-smi` shows B200 192GB, `nvcc --version` >=12.x, `nvcc -arch=sm_80 test.cu` works | Fix CUDA install; if B200 unavailable, rent A100 from Lambda/RunPod |
+| **G-0.3** | Thu afternoon | Reward function works | `compute_reward(compiled=True, correct=True, speedup=1.5)` returns 2.0 | Implement missing function (30 min, BLOCKING) |
+| **G-0.5** | Thu night | SFT data generated | `data/sft_data.json` has >=50 compilable examples | Lower bar to 30; if API fails, use Ops-6K curated_200 as warmup data |
+| **G-0.6** | Fri morning | GRPOTrainer initializes | test_06 passes, no OOM, no API errors | Adapt to TRL API changes (read changelog) |
+| **G-0.7** | Fri afternoon | Full GRPO step works | test_08 completes: generate -> compile -> reward -> gradient update | Debug loop; if unfixable, fall back to SFT-only + SkyDiscover |
+| **G-25** | Sat 9 AM | Compilation rate | test_07: base model >=50% compilation rate | <50%: extend warmup. <30%: switch model. <10%: abandon GRPO, go SkyDiscover-only. |
+
+---
+
+### 6.7 Realistic Timeline (with failure buffer)
+
+| Block | Time | Activity | Failure Buffer |
+|-------|------|----------|---------------|
+| **Wed night** | 4 hrs | Downloads + API key setup | Re-download Thu morning if needed |
+| **Thu 9AM-12PM** | 3 hrs | B200 setup + CUDA verify + Gate G-0.2 | 1 hr debug buffer |
+| **Thu 1PM-5PM** | 4 hrs | Implement `compute_reward()`, wire reward pipeline, Gates G-0.3 to G-0.6 | 2 hr buffer — critical coding block |
+| **Thu 6PM-overnight** | 8 hrs | SFT data generation (GLM-5 API), Gate G-0.5 | Can re-run with different API if first fails |
+| **Fri 9AM-5PM** | 8 hrs | Gate G-0.7 (full GRPO step), SkyDiscover minimal setup, `grpo_train.py` entry point | 3 hr buffer for debugging |
+| **Sat 9AM** | 30 min | **Gate G-25**: compilation rate decision | Decision tree already defined above |
+| **Sat 9:30AM-5PM** | 7.5 hrs | GRPO Stage 1->2->3 OR SkyDiscover-only (if GRPO fails gate) | SkyDiscover is the hedge |
+| **Sat 5PM-10PM** | 5 hrs | Results collection, demo, blog | 2 hr buffer |
+
+**Total available: ~43 hrs. Total planned: ~36 hrs. Buffer: ~7 hrs (16%).**
+
+---
+
+### 6.8 Minimum Viable Submission (If Everything Fails)
+
+Even if GRPO collapses AND SkyDiscover API is unavailable, we ship:
+
+1. **OpenEnv environment** — fully functional, ~600 LoC, tested (ship as-is)
+2. **WCC baseline kernels** — 3 variants with PAC verification (ship as-is)
+3. **Dataset pipeline** — 6,200 tasks curated and formatted (ship as-is)
+4. **Evaluation framework** — compilation, verification, profiling (ship as-is)
+5. **doubleGraph SKILLS.md** — 330-line A100 optimization reference (ship as-is)
+
+This is a credible hackathon submission. The infrastructure IS the contribution — a complete OpenEnv-compatible CUDA kernel optimization environment with real evaluation, real datasets, and real verification. The RL training is the stretch goal that makes it exceptional.

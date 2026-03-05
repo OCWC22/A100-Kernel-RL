@@ -340,6 +340,9 @@ for seed in range(5):
     # This requires the kernel to expose a callable interface
     # The exact mechanism depends on how the kernel is structured
     # For now, we check compilation + forbidden symbols only
+    # >>> RISK 1.1 / Gate G-0.3 BLOCKER: This TODO must be resolved before
+    # >>> any training. compute_reward() in openenv_env/reward.py needs to be
+    # >>> wired to compilation results. See FINAL_PRD Section 6.1, Risk 1.1.
     pass
 
 # Step 5: Profile (simplified — full version uses CUDA events)
@@ -366,6 +369,9 @@ compile_ms = (time.perf_counter() - start) / 30 * 1000
 
 # TODO: Profile the generated kernel
 # For hackathon MVP, use compilation success as primary signal
+# >>> RISK 1.1 / Gate G-0.3 BLOCKER: Without kernel profiling, rewards r=+2
+# >>> and r=+3 are unreachable (kernel_ms always equals compile_ms).
+# >>> Model only ever gets r=+1 or r=-1. See FINAL_PRD Section 6.1, Risk 1.1.
 kernel_ms = compile_ms  # Placeholder
 
 # Step 6: Compute reward (CUDA Agent Equation 1)
@@ -543,7 +549,7 @@ def run_stage1(model, tokenizer, output_dir: str):
         gradient_accumulation_steps=4, # Accumulate over 4 prompts
         # Effective batch for gradient = 16 completions
         num_train_epochs=1,
-        max_steps=300,                # Stage 1 budget
+        max_steps=100,                # Stage 1 budget (hackathon-adjusted; full budget=300)
         learning_rate=2e-6,           # Conservative — preserve Qwen3-Coder-Next capabilities
         
         # Precision
