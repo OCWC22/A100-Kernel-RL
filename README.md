@@ -139,7 +139,7 @@ model = FastModel.get_peft_model(
 import math
 from openenv_env.reward import compute_reward, trloo_post_process
 
-def cuda_kernel_reward(prompts, completions, completion_ids, trainer_state, **kwargs):
+def cuda_kernel_reward(prompts, completions, **kwargs):
     # Dispatch to Modal target GPU backend for evaluation
     result = eval_fn.remote({
         "cuda_code": code,

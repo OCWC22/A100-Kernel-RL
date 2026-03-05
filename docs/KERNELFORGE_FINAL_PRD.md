@@ -222,7 +222,7 @@ ls skydiscover/  # SkyDiscover repo
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install --no-deps unsloth unsloth_zoo
-pip install "trl[vllm]==0.29.0"  # Pin exact — reward_funcs signature changes across versions
+pip install "trl[vllm]==0.29.0"  # Pin to version validated by Gate G-0.6 — do NOT upgrade without re-running gate
 pip install transformers>=4.56.2 datasets accelerate peft
 pip install openenv-core>=0.2.1
 pip install cupy-cuda12x
@@ -233,7 +233,7 @@ pip install cupy-cuda12x
 nvidia-smi                    # B200, 192GB
 nvcc --version                # CUDA 12.x+
 python -c "import torch; print(torch.cuda.get_device_name())"
-python -c "import trl; print(trl.__version__)"  # Must be exactly 0.29.0 (pinned in pyproject.toml)
+python -c "import trl; print(trl.__version__)"  # Must match pinned version in pyproject.toml (validated by Gate G-0.6)
 python -c "import unsloth; print('OK')"
 ```
 
@@ -473,6 +473,11 @@ def profile_graph_baselines(algorithms=None):
     If doubleGraph wheel fails to install (B200 incompatible, A100/L4/A10G only),
     skip live profiling and use documented 3.6x average speedup estimates from
     docs/skills/doublegraph_a100.md patterns instead.
+
+    WARNING: If doubleGraph monkey-patches or replaces cuGraph internals,
+    the "cuGraph floor" timing may already be the optimized version.
+    Run cuGraph timing in a clean env WITHOUT doubleGraph imported,
+    then time doubleGraph separately. Otherwise floor ≈ ceiling.
     """
     if not DOUBLEGRAPH_AVAILABLE:
         print("WARNING: doubleGraph not installed — using estimated 3.6x baselines from docs")
@@ -789,9 +794,9 @@ TRLOO post-process: if Dr. Kernel derivation confirms N/(N-1) scaling, apply to 
 # Add a validation test: assert all required keys exist in eval result before computing reward.
 ```
 
-Key function: `cuda_kernel_reward(prompts, completions, completion_ids, trainer_state, **kwargs) -> list[float]`
+Key function: `cuda_kernel_reward(prompts, completions, **kwargs) -> list[float]`
 
-**TRL GRPO reward funcs** receive `prompts`, `completions`, `completion_ids`, `trainer_state`, plus any extra dataset columns via `**kwargs` — but only if `remove_unused_columns=False` in GRPOConfig (GRPOConfig defaults to False since GRPO usually needs extra columns for reward). For robustness, embed task_code + metadata directly into the `prompt` column text as belt-and-suspenders. Dataset must have a `prompt` column (singular, not `prompts`).
+**Permissive signature:** TRL's internal plumbing for reward_funcs has changed across versions (completion_ids, trainer_state added in some). Use `**kwargs` to absorb any extra args TRL passes — don't enumerate them. Set `remove_unused_columns=False` in GRPOConfig to keep extra dataset columns (like task_code) reachable via `**kwargs`. For robustness, also embed task_code + metadata directly into the `prompt` column text (belt-and-suspenders: works even if column stripping changes). Dataset must have a `prompt` column (singular, not `prompts`).
 
 (Full implementation in Engineering PRD v2.)
 
@@ -1387,7 +1392,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 
 **Counter-argument:** GRPO (arXiv 2402.03300, DeepSeekMath) has been validated in multiple domains. The "step-17 collapse" from CUDA Agent Section 3.3 is specifically for PURE RL without warmup — our 3-stage pipeline addresses this. Qwen3-Coder-Next (arXiv 2603.00729) was trained on 800K executable code tasks with agentic RL, giving it strong baseline CUDA familiarity. Temperature=1.0 matches its training distribution. The risk is real but bounded by our decision gates.
 
-**Stacked mitigations (Section 6.0.4 revision):** MARS+TRLOO hybrid credit assignment directly fixes the Dr. Kernel bias. G=2 (reduced from G=4) cuts zero-gradient probability: P(all 2 fail) = 0.7² = 49% at 30% compilation rate vs 0.7⁴ = 24% — still high, but CPPO pruning means only top-2 candidates get full eval, and Nsight structured rewards provide continuous signal even when both candidates compile (no more std=0 dead zones for reward levels between {1,2,3}). 50 steps (not 100) limits exposure. Qwen3-Coder-Next 80B MoE (3B active, FP8) is the primary model — trained on 800K executable tasks with strong CUDA baseline.
+**Stacked mitigations (Section 6.0.4 revision):** MARS+TRLOO hybrid credit assignment directly fixes the Dr. Kernel bias. G=2 (reduced from G=4) trades higher per-step all-fail probability (P(all 2 fail) = 0.7² = 49% vs 0.7⁴ = 24% at 30% compile rate) for 2x faster steps and lower memory — net throughput wins because each step is cheaper. CPPO pruning means only top candidates get full Modal eval, and Nsight structured rewards provide continuous signal even when both candidates compile (no more std=0 dead zones). 10 steps (not 100) limits exposure. Qwen3-Coder-Next 80B MoE (3B active, FP8) is the primary model — trained on 800K executable tasks with strong CUDA baseline.
 
 ---
 

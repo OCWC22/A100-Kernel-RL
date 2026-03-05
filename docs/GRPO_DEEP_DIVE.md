@@ -564,9 +564,7 @@ TRL's GRPOTrainer expects reward functions with this exact signature:
 def reward_func(
     prompts: list[str],           # The prompts
     completions: list[str],       # G completions for current prompt
-    completion_ids: list,         # Token IDs of completions
-    trainer_state,                # TRL trainer state
-    **kwargs                      # Extra dataset columns (if remove_unused_columns=False)
+    **kwargs                      # Absorbs completion_ids, trainer_state, extra columns
 ) -> list[float]:                 # One reward per completion
     """
     Must return a list of floats, same length as completions.
@@ -584,8 +582,7 @@ import os
 import re
 
 def cuda_kernel_reward(prompts: list[str], completions: list[str],
-                       completion_ids=None, trainer_state=None,
-                       task_code: list[str] = None, **kwargs) -> list[float]:
+                       **kwargs) -> list[float]:
     """
     Evaluate CUDA kernel completions through the KernelForge environment.
     
@@ -1545,16 +1542,16 @@ config = GRPOConfig(
 )
 ```
 
-And your reward function must accept the full TRL signature:
+And your reward function must use a **permissive signature** — TRL's internal plumbing has changed across versions:
 
 ```python
-def reward_func(prompts, completions, completion_ids, trainer_state,
-                task_code=None, **kwargs):
-    # task_code available because remove_unused_columns=False
+def reward_func(prompts, completions, **kwargs):
+    # Extra dataset columns arrive via **kwargs if remove_unused_columns=False
+    task_code = kwargs.get("task_code")
     # Belt-and-suspenders: also embed task_code in prompt text
 ```
 
-**Belt-and-suspenders approach:** embed task_code into the `prompt` column text so reward works even if column-stripping behavior changes across TRL versions.
+**Belt-and-suspenders approach:** embed task_code into the `prompt` column text so reward works regardless of TRL version behavior. Set `remove_unused_columns=False` explicitly — do not rely on defaults.
 
 ### 7.4 Group Size and Reward Variance
 

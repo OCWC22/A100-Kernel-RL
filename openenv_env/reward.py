@@ -7,6 +7,23 @@ from __future__ import annotations
 
 import math
 
+_REQUIRED_EVAL_KEYS = {"compiles", "correct", "speedup_vs_orig", "speedup_vs_dg", "error"}
+
+
+def validate_eval_result(result: dict) -> dict:
+    """Validate Modal evaluate_kernel return schema. Missing/invalid → safe defaults."""
+    missing = _REQUIRED_EVAL_KEYS - set(result)
+    if missing:
+        return {"compiles": False, "correct": False, "speedup_vs_orig": 0.0,
+                "speedup_vs_dg": 0.0, "error": f"missing keys: {missing}"}
+    out = dict(result)
+    # Clamp NaN/inf speedups to 0
+    for k in ("speedup_vs_orig", "speedup_vs_dg"):
+        v = out.get(k, 0.0)
+        if not isinstance(v, (int, float)) or math.isnan(v) or math.isinf(v):
+            out[k] = 0.0
+    return out
+
 
 def compute_reward(
     compiled: bool,
