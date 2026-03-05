@@ -316,7 +316,7 @@ That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 
 - Per-turn rewards come from **CUDA-Agent's profiling.py + ncu on Modal** (continuous Nsight signal → no lazy optimization)
 - CPPO cheap filter runs locally before Modal (2-4× eval saving)
-- G=2, max_steps=10 (P3 demo, local-only eval) fits in <1 hr on B200 FP8
+- G=2, max_steps=10 (P3 demo, B200 gen + A100 eval) fits in <1 hr on B200 FP8
 - Multi-turn dataset: each example has turns = [initial kernel, compiler feedback, refined kernel, …] using OpenEnv step()
 
 ### 7. Quick Reference Table (Copy into Your PRD Appendix)
@@ -1423,9 +1423,9 @@ TOTAL PER STEP (multi-turn, 3T):   ~270-930s    ~4.5-15 minutes
 |-------|-------|-----------|------------|-------------------|
 | Stage 1 (300 steps, 3 turns) | 300 | ~5 min | ~25 hours | 3,600 |
 | Stage 2 (RFT, SFT) | N/A | N/A | ~30 min | 100 |
-| Stage 3 (10 steps, 3 turns, local-only) | 10 | ~3 min | ~30 min | 60 |
+| Stage 3 (10 steps, 3 turns, B200+A100) | 10 | ~3 min | ~30 min | 60 |
 
-**Reality check (revised):** Stage 3 is now a P3 optional 10-step demo with local-only nvcc eval. Full pipeline: ~25 hrs (Stage 1) + 30 min (Stage 2) + 30 min (Stage 3) = ~26 hours. But Stage 3 only runs if Gate G-0.8 passes.
+**Reality check (revised):** Stage 3 is now a P3 optional 10-step demo (B200 generates, A100 evaluates via Modal). Full pipeline: ~25 hrs (Stage 1) + 30 min (Stage 2) + 30 min (Stage 3) = ~26 hours. But Stage 3 only runs if Gate G-0.8 passes.
 
 ### Hackathon-Adjusted Budget
 
@@ -1711,7 +1711,7 @@ def trloo_post_process(advantages: list[float], n: int) -> list[float]:
 
 ### The Problem (Section 6.1, Risk 1.2)
 
-Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. Stage 3 uses local-only eval (10 steps), but Stages 1-2 still need Modal for full profiling.
+Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. All stages use Modal A100 for correctness+timing; B200 handles local compile pre-checks only.
 
 ### The Fix: Local Cheap Eval for Early Turns, Modal for Final
 
@@ -2030,7 +2030,7 @@ STAGE 3 — CURRICULUM (Qwen3-Coder-Next 80B FP8):
 | `openenv_env/reward.py` (rewrite) | ~60 | Continuous log(speedup) + Nsight bonus + TRLOO post-process |
 | `training/hybrid_rollout.py` | ~80 | Local nvcc eval (no Modal for P3) |
 | `modal_app.py` update | ~20 | Nsight profiling endpoint (stretch goal) |
-| `training/stage3_grpo.py` update | ~20 | Revised configs (G=2, steps=10, local-only) |
+| `training/stage3_grpo.py` update | ~20 | Revised configs (G=2, steps=10, B200+A100) |
 
 **Dropped from v1:** `openenv_env/transform_grammar.py` (~250 LOC) — transformation grammar deferred to v2.
 

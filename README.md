@@ -57,7 +57,7 @@ System 3 reasoning with Input Generator (adversarial graphs) and Algorithmic Ver
 ### 4. **3-Stage RL Training Pipeline**
 - **Stage 1**: GRPO warm-up (LR=3e-6, T=0.9, 300 steps, easy subset)
 - **Stage 2**: Rejection Fine-Tuning (reward >= 1.0, SFT 3 epochs)
-- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, 10 steps P3 demo, local-only eval)
+- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, 10 steps P3 demo, B200 gen + A100 eval)
 
 ## 🚀 Quick Start
 
@@ -276,7 +276,7 @@ uv run python training/stage2_rft.py
 
 ### Stage 3: TRLOO-augmented GRPO + Curriculum (P3 Demo)
 ```bash
-# 10 steps, G=2, local-only eval, requires Gate G-0.8 pass first
+# 10 steps, G=2, B200 gen + A100 eval, requires Gate G-0.8 pass first
 uv run python training/stage3_grpo.py
 ```
 

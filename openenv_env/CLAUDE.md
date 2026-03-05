@@ -135,3 +135,8 @@ See GRPO-13, `GRPO_DEEP_DIVE.md` line 1845 for reference design.
 - Nsight rewards: `GRPO_DEEP_DIVE.md` line 1619 (GRPO-9)
 - Transform grammar (deferred): `GRPO_DEEP_DIVE.md` line 1845 (GRPO-13)
 - Reward function spec: `GRPO_DEEP_DIVE.md` line 557 (GRPO-3, Sec 3.2)
+
+
+<claude-mem-context>
+
+</claude-mem-context>

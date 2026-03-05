@@ -4,7 +4,7 @@
 
 | File | Lines | Size | Content |
 |------|-------|------|---------|
-| `KERNELFORGE_FINAL_PRD.md` | 1,382 | 73KB | Single source of truth — replaces all previous docs |
+| `KERNELFORGE_FINAL_PRD.md` | 1,432 | 78KB | Single source of truth — replaces all previous docs |
 | `GRPO_DEEP_DIVE.md` | 2,071 | 80KB | Algorithm math, memory budgets, stacked mitigations |
 
 ## PRD Section Map (`KERNELFORGE_FINAL_PRD.md`)
@@ -12,21 +12,21 @@
 | Section | Line | Title |
 |---------|------|-------|
 | 0 | 10 | Locked Decisions |
-| 1 | 26 | What We're Building |
-| 2 | 67 | Repository Structure |
-| 3 | 139 | Complete Task List (Phases 0-3) |
-| 4 | 1000 | Critical Path |
-| 5 | 1028 | All Links |
-| 6 | 1106 | Risk Matrix & Mitigations |
-| 6.0 | 1125 | Fundamental Research Risks |
-| 6.1 | 1274 | CUDA Agent Evaluation Pipeline Failures |
-| 6.2 | 1286 | doubleGraph Expert Baselines Failures |
-| 6.3 | 1298 | SkyDiscover Evolutionary Search Failures |
-| 6.4 | 1310 | GRPO Training Failures |
-| 6.5 | 1324 | Cross-Component Integration Risks |
-| 6.6 | 1335 | Decision Gates (Go/No-Go) |
-| 6.7 | 1350 | Realistic Timeline (with failure buffer) |
-| 6.8 | 1372 | Minimum Viable Submission |
+| 1 | 27 | What We're Building |
+| 2 | 76 | Repository Structure |
+| 3 | 148 | Complete Task List (Phases 0-3) |
+| 4 | 1050 | Critical Path |
+| 5 | 1078 | All Links |
+| 6 | 1156 | Risk Matrix & Mitigations |
+| 6.0 | 1175 | Fundamental Research Risks |
+| 6.1 | 1324 | CUDA Agent Evaluation Pipeline Failures |
+| 6.2 | 1336 | doubleGraph Expert Baselines Failures |
+| 6.3 | 1348 | SkyDiscover Evolutionary Search Failures |
+| 6.4 | 1360 | GRPO Training Failures |
+| 6.5 | 1374 | Cross-Component Integration Risks |
+| 6.6 | 1385 | Decision Gates (Go/No-Go) |
+| 6.7 | 1400 | Realistic Timeline (with failure buffer) |
+| 6.8 | 1422 | Minimum Viable Submission |
 
 ## GRPO Deep Dive Section Map (`GRPO_DEEP_DIVE.md`)
 
@@ -231,3 +231,8 @@ Key sections: Sec 6 (line 148) kernel deep dive, Sec 10 (line 292) H100/B200 por
 ## Archive
 
 All previous versions in `archive/`. Never reference for current decisions.
+
+
+<claude-mem-context>
+
+</claude-mem-context>

@@ -99,7 +99,7 @@ kernelforge/
 │   ├── run.py                      # Task 11: Main entry point (3-stage)
 │   ├── stage1_warmup.py            # Task 12: GRPO warmup config
 │   ├── stage2_rft.py               # Task 13: RFT filtering + SFT
-│   └── stage3_grpo.py              # Task 14: GRPO curriculum (max 10 steps local-only)
+│   └── stage3_grpo.py              # Task 14: GRPO curriculum (10 steps, B200 gen + A100 eval)
 │
 ├── openenv_wrapper/                # P0 — hackathon judges test step() first
 │   ├── __init__.py
@@ -769,9 +769,9 @@ THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extra
 
 TRLOO post-process: if Dr. Kernel derivation confirms N/(N-1) scaling, apply to advantages; otherwise run vanilla GRPO first with tight gates.
 
-Key function: `cuda_kernel_reward(completions, prompts=None, task_code=None, **kwargs) -> list[float]`
+Key function: `cuda_kernel_reward(completions, **kwargs) -> list[float]`
 
-**Signature MUST match TRL's expectation.** Extra dataset columns (task_code) forwarded via `**kwargs` when `remove_unused_columns=False`.
+**TRL GRPO ignores extra dataset columns** — only `prompt` reaches `reward_funcs`. Do NOT depend on `task_code` arriving via `**kwargs`. Instead, embed all context (task Python code, metadata, SKILL.md) directly into the `prompt` column text. Dataset must have a `prompt` column (singular, not `prompts`).
 
 (Full implementation in Engineering PRD v2.)
 
@@ -791,7 +791,7 @@ From CUDA Agent Section 3.2:
 #### Task 7: `data/loader.py` — Dataset Loading
 **Priority:** P0 | **Time:** 45 min | **Depends on:** Nothing
 
-Load Ops-6K. Format prompts with SKILL.md. Filter by stage (warmup=single-op, curriculum=all). Include `task_code` column for reward function forwarding.
+Load Ops-6K. Format prompts with SKILL.md. Filter by stage (warmup=single-op, curriculum=all). **Embed task_code + metadata directly into `prompt` column** (TRL GRPO only passes `prompt` to reward — extra columns are ignored).
 
 Key function: `load_training_dataset(stage: str) -> Dataset`
 
@@ -895,18 +895,30 @@ Wrap `evaluation/reward.py` in OpenEnv's `step()/reset()/state()` API. The core 
 **Depends on:** Tasks 1-5
 
 **Task 19:** `skydiscover_integration/evaluator.py` — wraps reward.py as SkyDiscover evaluator
+
+**CRITICAL:** SkyDiscover evaluator MUST use A100 execution-based correctness + timing (fast path at minimum). Compile-only scoring will select garbage kernels that happen to compile — same reward hacking problem as GRPO (CUDABench arXiv 2603.02236).
+
 ```python
 def evaluate(program_path: str) -> dict:
     with open(program_path) as f:
         cuda_code = f.read()
-    # Reuse our evaluation pipeline
-    from evaluation.compiler import compile_cuda
-    from evaluation.verifier import verify_kernel
-    result = compile_cuda(cuda_code)
-    if not result.success:
-        return {"combined_score": -1e9, "artifacts": {"feedback": result.stderr[:500]}}
-    # Score based on compilation success + any profiling
-    return {"combined_score": 1.0, "artifacts": {"feedback": "Compiled successfully"}}
+    # Use same A100 eval pipeline as GRPO reward (fast path: CUDA events + correctness)
+    from openenv_env.reward import compute_reward
+    import modal
+    eval_fn = modal.Function.from_name("kernelforge-a100", "evaluate_kernel")
+    result = eval_fn.remote({
+        "cuda_code": cuda_code,
+        "verify_graphs": 5, "warmup_iters": 50, "benchmark_runs": 30,
+    })
+    reward = compute_reward(
+        compiled=result.get("compiles", False),
+        correct=result.get("correct", False),
+        speedup_vs_eager=result.get("speedup_vs_orig", 0),
+        speedup_vs_compile=result.get("speedup_vs_dg", 0),
+    )
+    if reward <= -1.0:
+        return {"combined_score": -1e9, "artifacts": {"feedback": result.get("error", "failed")[:500]}}
+    return {"combined_score": float(reward), "artifacts": {"feedback": f"reward={reward:.3f}"}}
 ```
 
 **Task 20:** `run_evolution.sh` — launch script
@@ -1278,7 +1290,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | Approach | Probability | Time | Why |
 |----------|------------|------|-----|
 | **SkyDiscover evolutionary search** | HIGH | 2-4 hrs | AdaEvolve proven on 200+ tasks. No training. Primary hedge. |
-| **GRPO with stacked techniques** | MEDIUM | 4-6 hrs training | MARS+TRLOO fixes bias. Nsight fixes reward. CPPO cuts cost. Rich SKILL.md constrains generation. 10-step local-only experiment on Qwen3-Coder-Next 80B FP8. |
+| **GRPO with stacked techniques** | MEDIUM | 4-6 hrs training | MARS+TRLOO fixes bias. 2-tier Nsight fixes reward. CPPO cuts cost. Rich SKILL.md constrains generation. 10-step experiment (B200 gen + A100 eval) on Qwen3-Coder-Next 80B FP8. |
 | **SFT on curated data** (ConCuR-style) | MEDIUM-HIGH | 3-5 hrs | ConCuR shows curated traces > RL. Parallel track. |
 | **GRPO as originally designed in PRD** | LOW | 7-12 hrs | Without stacking, still biased, stub reward, too few samples. |
 
@@ -1289,7 +1301,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | **P0** | By Friday night | OpenEnv env that calls CUDA-Agent's EXACT scripts (copied verbatim into evaluation/) + continuous speedup reward (log(speedup) + occupancy + coalescing) + TRLOO N/(N-1) post-process in reward wrapper | Working eval pipeline with continuous reward |
 | **P1** | Parallel with P0 | SkyDiscover evolution on 5 seed .cu files (gemm, softmax, layernorm, fused_bias_relu, reduce_sum). 80-120 evolutions per seed. | Demo-worthy evolved kernels |
 | **P2** | After P0 | Rich SKILL.md with doubleGraph patterns (from docs/skills/doublegraph_a100.md) + CUDA-Agent SKILL.md verbatim. 50-example SFT warmup via Unsloth built-in trainer. | Anchored compilation ability |
-| **P3** | Optional demo | 10-step GRPO with local-only nvcc eval (no Modal). Gate G-0.8 must pass first. | Proof-of-concept RL training |
+| **P3** | Optional demo | 10-step GRPO: B200 generates + updates weights, A100 (Modal) evaluates correctness + speedup for reward. Gate G-0.8 must pass first. | Proof-of-concept RL training |
 
 **Total new code:** ~200 LOC across 4 files (down from ~450 — transformation grammar dropped). Fits in 8-12 hours coding + 2-4 hours training.
 

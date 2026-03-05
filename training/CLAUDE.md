@@ -120,3 +120,8 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 - Quick reference card: `GRPO_DEEP_DIVE.md` line 1569 (GRPO-8)
 - Full stacked architecture: `GRPO_DEEP_DIVE.md` line 1974 (GRPO-14)
 - Monitor checklist: `GRPO_DEEP_DIVE.md` line 1446 (GRPO-6)
+
+
+<claude-mem-context>
+
+</claude-mem-context>
