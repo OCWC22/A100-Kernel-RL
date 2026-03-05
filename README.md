@@ -43,7 +43,7 @@ KernelForge-OpenEnv/
 │   └── curriculum.py                    # 4-phase curriculum with topology-aware graph tasks
 ├── datasets/                            # Training datasets
 │   ├── build_combined_dataset.py        # Unified builder: manifest + Ops-6K → combined JSONL
-│   ├── combined_kernelforge.jsonl       # ~6,192 rows (192 doubleGraph + ~6K Ops-6K)
+│   ├── combined_kernelforge.jsonl       # 192 rows (doubleGraph; ~6,192 after Ops-6K merge on B200)
 │   ├── extract_doublegraph_a100.py      # Harvester + shared constants
 │   ├── doublegraph_sft.jsonl            # SFT format (HF messages) for Stage 2
 │   └── integrity.py                     # Dataset validation (3 checks)
@@ -75,7 +75,7 @@ System 3 reasoning with Input Generator (adversarial graphs) and Algorithmic Ver
 ### 4. **3-Stage RL Training Pipeline**
 - **Stage 1**: GRPO warm-up (LR=3e-6, T=0.9, 300 steps, easy subset)
 - **Stage 2**: Rejection Fine-Tuning (reward >= 0.0, SFT 3 epochs)
-- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, **50 steps, 10 turns, 16K context**, B200 gen + A100 eval)
+- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, **150 steps, 20 turns, 32K context**, B200 gen + A100 eval)
 
 ## 🚀 Quick Start
 
@@ -120,7 +120,7 @@ modal run modal_train.py --stage 1
 # Stage 1: Quick test (10 steps only)
 modal run modal_train.py --stage 1 --max-steps 10
 
-# Stage 3: TRLOO-GRPO (50 steps, 10 turns, requires Stage 2 checkpoint)
+# Stage 3: TRLOO-GRPO (150 steps, 20 turns, requires Stage 2 checkpoint)
 modal run modal_train.py --stage 3
 ```
 
@@ -344,7 +344,9 @@ uv run streamlit run demo/streamlit_demo.py
 
 ## 📈 Benchmarks
 
-### Hardware Utilization
+> **Note:** These are target estimates from doubleGraph paper analysis. Live benchmarks will be produced on hackathon day via `modal_app.py:evaluate_kernel()` + `profile_baselines()`.
+
+### Hardware Utilization (Target)
 | Metric | Baseline | Optimized | Improvement |
 |--------|----------|-----------|-------------|
 | SM Utilization | 45% | 87% | +93% |
@@ -352,7 +354,7 @@ uv run streamlit run demo/streamlit_demo.py
 | Memory Throughput | 1.2 TB/s | 2.8 TB/s | +133% |
 | Kernel Launches | 47 | 1 | -98% |
 
-### Speedup Scaling
+### Speedup Scaling (Target, based on doubleGraph 3.6x avg)
 | Graph Size | cuGraph (ms) | KernelForge (ms) | Speedup |
 |------------|--------------|------------------|---------|
 | 1K vertices | 0.8 | 0.2 | 4.0x |
@@ -394,7 +396,7 @@ docker run --gpus all -p 8501:8501 kernelforge-openenv
 
 - **[Final PRD](docs/KERNELFORGE_FINAL_PRD.md)**: Single source of truth — decisions, tasks, architecture
 - **[GRPO Deep Dive](docs/GRPO_DEEP_DIVE.md)**: Training algorithm math and stacked mitigations
-- **[DoubleGraph SKILLS](docs/skills/doublegraph_a100.md)**: A100 kernel engineering reference
+- **[DoubleGraph SKILLS](docs/skills/DOUBLEGRAPH_A100.md)**: A100 kernel engineering reference
 - **[skill_a100.md](skill_a100.md)**: Agent optimization rules
 - **[docs/README.md](docs/README.md)**: Navigation hub with per-directory CLAUDE.md index
 - **[Archive](docs/archive/)**: Previous doc versions and research papers
@@ -430,7 +432,7 @@ docker run --gpus all -p 8501:8501 kernelforge-openenv
 
 ## 🤝 Contributing
 
-We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) for details.
+We welcome contributions! Please open an issue or pull request.
 
 ### Development Workflow
 1. Fork the repository
@@ -441,7 +443,7 @@ We welcome contributions! Please see our [Contributing Guide](CONTRIBUTING.md) f
 
 ## 📄 License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+This project is licensed under the MIT License.
 
 ## 🙏 Acknowledgments
 
