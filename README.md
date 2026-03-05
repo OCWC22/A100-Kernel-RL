@@ -53,9 +53,9 @@ Mathematically-proven safe non-atomic Union-Find operations that eliminate seria
 System 3 reasoning with Input Generator (adversarial graphs) and Algorithmic Verifier (mathematical invariants) providing empirical correctness guarantees.
 
 ### 4. **3-Stage RL Training Pipeline**
-- **Stage 1**: SFT warm-up on curated CUDA examples
-- **Stage 2**: Rejection Fine-Tuning (reward ≥ 2 only)
-- **Stage 3**: GRPO with milestone-based discrete rewards
+- **Stage 1**: GRPO warm-up (LR=3e-6, T=0.9, 300 steps, easy subset)
+- **Stage 2**: Rejection Fine-Tuning (reward >= 1.0, SFT 3 epochs)
+- **Stage 3**: GRPO + curriculum (LR=5e-6, T=0.7, 200 steps, 4 phases)
 
 ## 🚀 Quick Start
 
@@ -127,7 +127,8 @@ model, tokenizer = FastModel.from_pretrained(
 
 # LoRA adapters for efficient fine-tuning
 model = FastModel.get_peft_model(
-    model, r=32, target_modules=["q_proj", "k_proj", "v_proj", "o_proj"]
+    model, r=16, target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+        "shared_expert.gate_proj", "shared_expert.up_proj", "shared_expert.down_proj"]
 )
 ```
 
@@ -138,8 +139,8 @@ def cuda_kernel_reward(completions, **kwargs):
     result = eval_fn.remote({
         "cuda_code": code,
         "verify_graphs": 5,
-        "warmup_iters": 100,
-        "benchmark_runs": 50,
+        "warmup_iters": 50,
+        "benchmark_runs": 30,
     })
     
     # Discrete milestones prevent reward hacking
@@ -254,29 +255,30 @@ for (int k = 0; k < TILE_SIZE; k++) {
 
 ## 🏋️ Training Commands
 
-### Stage 1: SFT Warm-up
+### Stage 1: GRPO Warm-up
 ```bash
-uv run python training/sft_warmup.py
+uv run python training/stage1_warmup.py
 ```
 
 ### Stage 2: Rejection Fine-Tuning
 ```bash
-uv run python training/rft_filter.py --trajectories 100 --min-reward 2.0
+uv run python training/rft_filter.py --trajectories 100 --min-reward 1.0
+uv run python training/stage2_rft.py
 ```
 
 Optional CUDA-Agent prompt augmentation for RFT:
 ```bash
-CUDA_AGENT_RFT_PROMPTS=128 uv run python training/rft_filter.py --trajectories 100 --min-reward 2.0
+CUDA_AGENT_RFT_PROMPTS=128 uv run python training/rft_filter.py --trajectories 100 --min-reward 1.0
 ```
 
-### Stage 3: GRPO Training
+### Stage 3: GRPO + Curriculum
 ```bash
-uv run python training/grpo_train.py --steps 100 --batch-size 1
+uv run python training/stage3_grpo.py
 ```
 
 Optional CUDA-Agent prompt augmentation for GRPO:
 ```bash
-CUDA_AGENT_MAX_SAMPLES=2048 uv run python training/grpo_train.py --steps 100 --batch-size 1
+CUDA_AGENT_MAX_SAMPLES=2048 uv run python training/stage3_grpo.py
 ```
 
 ### CUDA-Agent Integration
@@ -362,9 +364,10 @@ docker run --gpus all -p 8501:8501 kernelforge-openenv
 ## 📚 Documentation
 
 - **[Final PRD](docs/KERNELFORGE_FINAL_PRD.md)**: Single source of truth — decisions, tasks, architecture
-- **[GRPO Deep Dive](docs/GRPO_DEEP_DIVE.md)**: Training algorithm math and implementation
+- **[GRPO Deep Dive](docs/GRPO_DEEP_DIVE.md)**: Training algorithm math and stacked mitigations
 - **[DoubleGraph SKILLS](docs/skills/doublegraph_a100.md)**: A100 kernel engineering reference
 - **[skill_a100.md](skill_a100.md)**: Agent optimization rules
+- **[docs/README.md](docs/README.md)**: Navigation hub with per-directory CLAUDE.md index
 - **[Archive](docs/archive/)**: Previous doc versions and research papers
 
 ## 🏆 Hackathon Strategy
