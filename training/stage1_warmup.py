@@ -16,10 +16,11 @@ from __future__ import annotations
 
 import os
 
-from datasets import Dataset, concatenate_datasets, load_dataset
-from trl import GRPOConfig, GRPOTrainer
+from datasets import Dataset
+from trl import GRPOConfig
 
-from training.cuda_agent_integration import load_cuda_agent_prompt_dataset
+from training.custom_grpo_trainer import TRLOOGRPOTrainer
+from training.dataset_loader import load_training_dataset
 from training.model_loader import load_model_and_tokenizer
 from training.multi_turn_rollout import make_multi_turn_rollout, reward_from_env
 
@@ -35,21 +36,20 @@ MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "300"))
 # --- Dataset loading ---
 
 def load_stage1_dataset() -> Dataset:
-    """Load easy prompts for warm-up: single-op kernels from Ops-6K + fallbacks."""
-    prompt_sets = []
+    """Load stage1 prompts from unified dataset loader, with safe fallback."""
 
     try:
         max_samples = int(os.getenv("CUDA_AGENT_STAGE1_SAMPLES", "512"))
-        ops6k = load_cuda_agent_prompt_dataset(max_samples=max_samples)
-        if len(ops6k) > 0:
-            print(f"Loaded {len(ops6k)} CUDA-Agent prompts for Stage 1")
-            prompt_sets.append(ops6k)
+        ds = load_training_dataset(
+            stage="stage1",
+            ops6k_max=max_samples,
+            seed=42,
+        )
+        if isinstance(ds, Dataset) and len(ds) > 0:
+            print(f"Loaded {len(ds)} unified Stage 1 prompts")
+            return ds.shuffle(seed=42)
     except Exception as e:
         print(f"Could not load Ops-6K for Stage 1: {e}")
-
-    if prompt_sets:
-        merged = concatenate_datasets(prompt_sets) if len(prompt_sets) > 1 else prompt_sets[0]
-        return merged.shuffle(seed=42)
 
     print("Using fallback Stage 1 prompts")
     return Dataset.from_list([
@@ -101,7 +101,7 @@ def main():
         vllm_mode="colocate",
     )
 
-    trainer = GRPOTrainer(
+    trainer = TRLOOGRPOTrainer(
         model=model,
         processing_class=tokenizer,
         reward_funcs=[reward_from_env],

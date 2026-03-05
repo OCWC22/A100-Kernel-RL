@@ -24,10 +24,12 @@ from __future__ import annotations
 import os
 
 from datasets import Dataset
-from trl import GRPOConfig, GRPOTrainer
+from trl import GRPOConfig
 
+from training.custom_grpo_trainer import TRLOOGRPOTrainer
 from training.model_loader import load_model_and_tokenizer
 from training.curriculum import CurriculumManager
+from training.dataset_loader import load_training_dataset
 from training.multi_turn_rollout import make_multi_turn_rollout
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
@@ -85,6 +87,21 @@ def main():
     print(f"  Max turns per episode: {MAX_TURNS}")
     print(f"  Max training steps: {MAX_STEPS}")
 
+    try:
+        ops6k_max_env = os.getenv("KERNELFORGE_STAGE3_OPS6K_MAX", "")
+        ops6k_max = int(ops6k_max_env) if ops6k_max_env.strip() else None
+        combined_rows = load_training_dataset(
+            stage="stage3",
+            ops6k_max=ops6k_max,
+            seed=42,
+            curriculum_manager=curriculum,
+        )
+        if isinstance(combined_rows, list):
+            print(f"  Injected combined dataset into curriculum ({len(combined_rows)} rows)")
+    except Exception as e:
+        print(f"  Could not inject combined dataset into curriculum: {e}")
+        print("  Continuing with built-in curriculum problems only")
+
     model, tokenizer = load_model_and_tokenizer(checkpoint_path=STAGE2_OUTPUT)
     dataset = build_curriculum_dataset(num_prompts=200)
 
@@ -114,7 +131,7 @@ def main():
         vllm_mode="colocate",
     )
 
-    trainer = GRPOTrainer(
+    trainer = TRLOOGRPOTrainer(
         model=model,
         processing_class=tokenizer,
         reward_funcs=[reward_from_env_with_curriculum],

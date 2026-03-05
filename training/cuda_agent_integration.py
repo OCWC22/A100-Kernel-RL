@@ -74,11 +74,16 @@ def load_cuda_agent_prompt_dataset(max_samples: int | None = 1024, seed: int = 4
         if len(ds) > max_samples:
             ds = ds.shuffle(seed=seed).select(range(max_samples))
 
-    prompts: list[dict[str, str]] = []
+    prompts: list[dict[str, Any]] = []
     for row in ds:
         prompt = _build_cuda_prompt(row)
         if prompt:
-            prompts.append({"prompt": prompt})
+            prompts.append({
+                "prompt": prompt,
+                "task_code": str(row.get("code", "")),
+                "ops": str(row.get("ops", "")),
+                "data_source": str(row.get("data_source", "")),
+            })
 
     return Dataset.from_list(prompts)
 
