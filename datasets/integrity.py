@@ -50,33 +50,44 @@ def verify_jsonl(path: str, required_keys: list[str] | None = None) -> dict:
         "path": path,
         "exists": True,
         "line_count": line_count,
-        "errors": errors[:20],  # cap error output
+        "errors": errors[:20],
         "total_errors": len(errors),
         "valid": len(errors) == 0,
     }
 
 
-def verify_curated_dataset(path: str = "datasets/curated_200.jsonl") -> dict:
-    """Validate the curated 200-problem training dataset."""
-    result = verify_jsonl(path, required_keys=["ops", "difficulty"])
-    if result["valid"]:
-        # Check difficulty distribution
-        difficulties = []
+def verify_combined_dataset(path: str = "datasets/combined_kernelforge.jsonl") -> dict:
+    """Validate the combined training dataset."""
+    result = verify_jsonl(path, required_keys=["prompt", "ops", "difficulty", "data_source"])
+    if result["valid"] and result["line_count"] > 0:
+        difficulties = {}
+        sources = {}
         with open(path) as f:
             for line in f:
                 line = line.strip()
-                if line:
-                    difficulties.append(json.loads(line).get("difficulty", 0))
-        result["difficulty_distribution"] = {
-            d: difficulties.count(d) for d in sorted(set(difficulties))
-        }
+                if not line:
+                    continue
+                row = json.loads(line)
+                d = row.get("difficulty", 0)
+                difficulties[d] = difficulties.get(d, 0) + 1
+                s = row.get("data_source", "unknown")
+                sources[s] = sources.get(s, 0) + 1
+        result["difficulty_distribution"] = dict(sorted(difficulties.items()))
+        result["source_distribution"] = dict(sorted(sources.items()))
     result["sha256"] = hash_file(path)
     return result
 
 
-def verify_baselines(path: str = "datasets/baselines.jsonl") -> dict:
-    """Validate the pre-computed baselines dataset."""
-    result = verify_jsonl(path, required_keys=["name", "baseline_eager_ms"])
+def verify_manifest(path: str = "docs/research/doublegraph/doublegraph_a100_manifest.jsonl") -> dict:
+    """Validate the doubleGraph A100 manifest."""
+    result = verify_jsonl(path, required_keys=["kernel_id", "category", "algorithm_name", "variant"])
+    result["sha256"] = hash_file(path)
+    return result
+
+
+def verify_sft_dataset(path: str = "datasets/doublegraph_sft.jsonl") -> dict:
+    """Validate the SFT dataset."""
+    result = verify_jsonl(path, required_keys=["messages"])
     result["sha256"] = hash_file(path)
     return result
 
@@ -87,14 +98,14 @@ def main():
     print("=" * 50)
 
     for name, check_fn in [
-        ("Curated 200", verify_curated_dataset),
-        ("Baselines", verify_baselines),
+        ("Combined Dataset", verify_combined_dataset),
+        ("doubleGraph Manifest", verify_manifest),
+        ("SFT Dataset", verify_sft_dataset),
     ]:
         result = check_fn()
         status = "PASS" if result.get("valid") else "FAIL"
         print(f"\n{name}: {status}")
         print(f"  Path: {result.get('path', 'N/A')}")
-        print(f"  Exists: {result.get('exists', False)}")
         print(f"  Lines: {result.get('line_count', 0)}")
         print(f"  SHA-256: {result.get('sha256', 'N/A')}")
         if result.get("errors"):
@@ -102,6 +113,8 @@ def main():
                 print(f"  ERROR: {e}")
         if result.get("difficulty_distribution"):
             print(f"  Difficulties: {result['difficulty_distribution']}")
+        if result.get("source_distribution"):
+            print(f"  Sources: {result['source_distribution']}")
 
 
 if __name__ == "__main__":
