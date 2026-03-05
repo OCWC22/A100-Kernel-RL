@@ -122,10 +122,10 @@ Entry type: `GPUCacheEntry(key: str, value: Any, metadata: dict)`
 
 Transformation grammar (12-40 rules) was planned but deferred. No production system has shipped this for CUDA kernels as of March 2026. For v1, use CUDA-Agent's SKILL.md verbatim + doubleGraph pattern paste.
 
-See GRPO-13, `GRPO_DEEP_DIVE.md` line 1490 for reference design.
+See GRPO-13, `GRPO_DEEP_DIVE.md` line 1845 for reference design.
 
 ## Deep Dive Pointers
 
-- Nsight rewards: `GRPO_DEEP_DIVE.md` line 1276 (GRPO-9)
-- Transform grammar (deferred): `GRPO_DEEP_DIVE.md` line 1490 (GRPO-13)
-- Reward function spec: `GRPO_DEEP_DIVE.md` line 237 (GRPO-3, Sec 3.2)
+- Nsight rewards: `GRPO_DEEP_DIVE.md` line 1619 (GRPO-9)
+- Transform grammar (deferred): `GRPO_DEEP_DIVE.md` line 1845 (GRPO-13)
+- Reward function spec: `GRPO_DEEP_DIVE.md` line 557 (GRPO-3, Sec 3.2)

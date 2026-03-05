@@ -89,11 +89,11 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 
 | Technique | Deep Dive Ref | File to Create |
 |-----------|---------------|----------------|
-| MARS+TRLOO credit assignment | GRPO-4 line 852 | `custom_grpo_loop.py` |
-| Nsight structured rewards | GRPO-9 line 1276 | `hybrid_rollout.py` |
-| CPPO completion pruning | GRPO-11 line 1403 | (in custom_grpo_loop.py) |
-| MASPO soft trust region | GRPO-12 line 1446 | `maspo_loss.py` |
-| ~~Transformation grammar~~ | GRPO-13 line 1490 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
+| MARS+TRLOO credit assignment | GRPO-4 line 1171 | `custom_grpo_loop.py` |
+| Nsight structured rewards | GRPO-9 line 1619 | `hybrid_rollout.py` |
+| CPPO completion pruning | GRPO-11 line 1758 | (in custom_grpo_loop.py) |
+| MASPO soft trust region | GRPO-12 line 1801 | `maspo_loss.py` |
+| ~~Transformation grammar~~ | GRPO-13 line 1845 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
 
 ## Files to Create
 
@@ -111,6 +111,6 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 
 ## Deep Dive Pointers
 
-- Quick reference card: `GRPO_DEEP_DIVE.md` line 1226 (GRPO-8)
-- Full stacked architecture: `GRPO_DEEP_DIVE.md` line 1617 (GRPO-14)
-- Monitor checklist: `GRPO_DEEP_DIVE.md` line 1103 (GRPO-6)
+- Quick reference card: `GRPO_DEEP_DIVE.md` line 1569 (GRPO-8)
+- Full stacked architecture: `GRPO_DEEP_DIVE.md` line 1974 (GRPO-14)
+- Monitor checklist: `GRPO_DEEP_DIVE.md` line 1446 (GRPO-6)
