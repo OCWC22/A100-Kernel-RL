@@ -29,9 +29,12 @@ def compute_reward(
         warp_efficiency: Warp execution efficiency (0.0-1.0), or None.
 
     Returns:
-        -1.0 for compile/correctness failure.
+        -1.0 for compile/correctness failure (REGARDLESS of speedup — correctness
+        is checked BEFORE speedup to prevent reward hacking).
         log(speedup) + nsight_bonus for correct kernels.
     """
+    # Correctness gate: must pass BEFORE any speedup signal reaches gradients.
+    # A fast-but-wrong kernel MUST get -1.0, not a positive reward.
     if not compiled or not correct:
         return -1.0
 

@@ -52,7 +52,7 @@ dependencies = [
 train = [
     # unsloth is NOT listed here — install separately with: pip install --no-deps unsloth unsloth_zoo
     # This bypasses unsloth's stale trl<=0.24.0 cap (fixed in Dec 2025 release)
-    "trl[vllm]>=0.29.0",
+    "trl[vllm]==0.29.0",  # Pin exact — GRPO reward_funcs signature changes across versions
     "transformers>=4.56.2,!=5.0.0,!=5.1.0",
     "datasets>=3.0",
     "accelerate>=1.4.0",

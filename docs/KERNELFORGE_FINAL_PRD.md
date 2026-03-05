@@ -222,7 +222,7 @@ ls skydiscover/  # SkyDiscover repo
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install --no-deps unsloth unsloth_zoo
-pip install "trl[vllm]>=0.29.0"
+pip install "trl[vllm]==0.29.0"  # Pin exact — reward_funcs signature changes across versions
 pip install transformers>=4.56.2 datasets accelerate peft
 pip install openenv-core>=0.2.1
 pip install cupy-cuda12x
@@ -233,7 +233,7 @@ pip install cupy-cuda12x
 nvidia-smi                    # B200, 192GB
 nvcc --version                # CUDA 12.x+
 python -c "import torch; print(torch.cuda.get_device_name())"
-python -c "import trl; print(trl.__version__)"  # ≥0.29.0 — PIN this version in pyproject.toml
+python -c "import trl; print(trl.__version__)"  # Must be exactly 0.29.0 (pinned in pyproject.toml)
 python -c "import unsloth; print('OK')"
 ```
 
@@ -759,7 +759,7 @@ Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` an
 
 ---
 
-#### Task 5: `evaluation/reward.py` — GRPO Reward Function
+#### Task 5: `openenv_env/reward.py` — GRPO Reward Function
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Tasks 1-4
 
 THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, dispatches to Modal A100 for execution-based correctness + speedup timing.
@@ -770,9 +770,28 @@ THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extra
 
 TRLOO post-process: if Dr. Kernel derivation confirms N/(N-1) scaling, apply to advantages; otherwise run vanilla GRPO first with tight gates.
 
+**Correctness gate:** `correct=False` → reward = -1.0 regardless of speedup. This prevents reward hacking where a fast-but-wrong kernel gets positive gradient signal. The reward function checks correctness BEFORE computing speedup.
+
+**Modal `evaluate_kernel` return schema (locked):**
+```python
+# evaluate_kernel(payload) -> dict with these REQUIRED keys:
+{
+    "compiles": bool,           # nvcc compilation succeeded
+    "correct": bool,            # execution-based correctness on 5+ random inputs vs PyTorch ref
+    "speedup_vs_orig": float,   # speedup vs torch.eager baseline (0 if not measured)
+    "speedup_vs_dg": float,     # speedup vs torch.compile/doubleGraph baseline (0 if not measured)
+    "error": str,               # error message if compiles=False or correct=False, else ""
+    # Optional (slow path / top-k only):
+    "occupancy": float | None,  # SM occupancy from ncu (0.0-1.0)
+    "mem_coalescing": float | None,  # memory coalescing efficiency (0.0-1.0)
+    "warp_efficiency": float | None, # warp execution efficiency (0.0-1.0)
+}
+# Add a validation test: assert all required keys exist in eval result before computing reward.
+```
+
 Key function: `cuda_kernel_reward(prompts, completions, completion_ids, trainer_state, **kwargs) -> list[float]`
 
-**TRL GRPO reward funcs** receive `prompts`, `completions`, `completion_ids`, `trainer_state`, plus any extra dataset columns via `**kwargs` — but only if `remove_unused_columns=False` in GRPOConfig (default is True, which strips extra columns). For robustness, embed task_code + metadata directly into the `prompt` column text so reward works regardless of column-stripping behavior. Dataset must have a `prompt` column (singular, not `prompts`).
+**TRL GRPO reward funcs** receive `prompts`, `completions`, `completion_ids`, `trainer_state`, plus any extra dataset columns via `**kwargs` — but only if `remove_unused_columns=False` in GRPOConfig (GRPOConfig defaults to False since GRPO usually needs extra columns for reward). For robustness, embed task_code + metadata directly into the `prompt` column text as belt-and-suspenders. Dataset must have a `prompt` column (singular, not `prompts`).
 
 (Full implementation in Engineering PRD v2.)
 
@@ -879,7 +898,7 @@ Three GRPOConfig objects for warmup / RFT / curriculum. All parameters specified
 **Time:** 2-3 hours
 **Depends on:** Tasks 1-5
 
-Wrap `evaluation/reward.py` in OpenEnv's `step()/reset()/state()` API. The core logic is identical — this is packaging.
+Wrap `openenv_env/reward.py` in OpenEnv's `step()/reset()/state()` API. The core logic is identical — this is packaging.
 
 **Critical: `step()` must be robust even if model loading or GPU setup is slow.** Cache the model on startup, warm the CUDA context (dummy kernel launch), and pre-load tokenizer. If Modal is slow on first call, return a timeout-safe response rather than crashing.
 
@@ -990,7 +1009,7 @@ echo "All evolution jobs launched. Check results/skydiscover/"
 These feed into:
 - `data/loader.py` (Task 7) — adds graph tasks alongside dense ops
 - `data/skill_a100.md` (Task 9) — includes doubleGraph patterns from `a100_patterns.md`
-- `evaluation/reward.py` (Task 5) — graph tasks use per-algorithm reward calibration:
+- `openenv_env/reward.py` (Task 5) — graph tasks use per-algorithm reward calibration:
   - r = -1: compilation fails OR correctness fails
   - r = +1: correct but slower than cuGraph baseline
   - r = +2: faster than cuGraph baseline
@@ -1363,7 +1382,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | # | Failure | Severity | Evidence | Mitigation |
 |---|---------|----------|----------|------------|
 | 4.1 | **Memory budget unverified** — FP8 (~85GB) + LoRA (0.2GB) + optimizer (3GB) + KV cache (12GB) + activations = ~100GB estimated. No actual B200 measurement. Gradient checkpointing + GRPO interaction untested. | CRITICAL | GRPO_DEEP_DIVE lines 182-193. Estimates only, no benchmarks. | **Gate G-0.2**: Run `nvidia-smi` during model load + single GRPO step. If OOM: (a) reduce max_seq_length 8192->4096, (b) reduce G=4->2, (c) switch to 4-bit quantization, (d) use backup Qwen3.5-9B (18GB). Decision ladder, not binary. |
-| 4.2 | **TRL GRPOTrainer API compatibility** — `rollout_func` parameter is experimental. `reward_funcs` vs `reward_func` naming uncertain. `remove_unused_columns=False` behavior unverified with TRL >=0.29. | HIGH | GRPO_DEEP_DIVE line 566 (`reward_funcs`), line 1080 (`remove_unused_columns`). | **Gate G-0.6**: `test_06_grpo_init.py` — initialize GRPOTrainer with our config, verify no crash. 15 min. If API changed: read TRL 0.29 changelog, adapt. The core GRPO math is model-agnostic; only the TRL wrapper changes. |
+| 4.2 | **TRL GRPOTrainer API compatibility** — `rollout_func` parameter is experimental. `reward_funcs` vs `reward_func` naming uncertain. `remove_unused_columns=False` behavior unverified. | HIGH | GRPO_DEEP_DIVE line 566 (`reward_funcs`), line 1080 (`remove_unused_columns`). | **Gate G-0.6**: `test_06_grpo_init.py` — initialize GRPOTrainer with our config, verify no crash. 15 min. TRL pinned to ==0.29.0 in pyproject.toml — do NOT upgrade without re-running gate. |
 | 4.3 | **G=4 + low compilation rate = zero-gradient steps** — if base model compiles <30% of CUDA, P(all 4 fail) > 24%. Those steps produce std(r)=0 -> advantage=0 -> no learning. | HIGH | GRPO_DEEP_DIVE line 73 (edge case), lines 1095-1110 (math). No empirical compilation rate for Qwen3-Coder-Next. | **Gate G-25** (Saturday morning): test_07 measures compilation rate. If <50%: extend Stage 1 warmup. If <30%: switch model. CUDA Agent (arXiv 2602.24286, Section 3.3) shows 3-stage pipeline prevents step-17 collapse — our warmup follows their protocol. |
 
 **Counter-argument:** GRPO (arXiv 2402.03300, DeepSeekMath) has been validated in multiple domains. The "step-17 collapse" from CUDA Agent Section 3.3 is specifically for PURE RL without warmup — our 3-stage pipeline addresses this. Qwen3-Coder-Next (arXiv 2603.00729) was trained on 800K executable code tasks with agentic RL, giving it strong baseline CUDA familiarity. Temperature=1.0 matches its training distribution. The risk is real but bounded by our decision gates.
