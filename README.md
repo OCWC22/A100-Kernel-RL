@@ -68,8 +68,8 @@ System 3 reasoning with Input Generator (adversarial graphs) and Algorithmic Ver
 
 ```bash
 # Clone repository
-git clone https://github.com/OCWC22/H100-Kernel-RL.git
-cd H100-Kernel-RL
+git clone https://github.com/OCWC22/A100-Kernel-RL.git
+cd A100-Kernel-RL
 
 # Install dependencies
 uv sync
@@ -298,9 +298,9 @@ uv run python datasets/generate_wcc_dataset.py --examples 100
 
 The Streamlit demo showcases:
 
-- **🔥 Live Optimization**: Real-time kernel optimization with H100 telemetry
+- **🔥 Live Optimization**: Real-time kernel optimization with A100 telemetry
 - **📊 Training Monitor**: GRPO training progress and reward curves
-- **🖥️ Hardware Telemetry**: H100 SM utilization, memory throughput, feature status
+- **🖥️ Hardware Telemetry**: A100 SM utilization, memory throughput, feature status
 - **🧪 PAC Verification**: Graph visualization and invariant checking
 - **📈 Performance Comparison**: Runtime comparisons across optimization levels
 
@@ -361,11 +361,11 @@ docker run --gpus all -p 8501:8501 kernelforge-openenv
 
 ## 📚 Documentation
 
-- **[Truth.md](docs/KernelForge_Truth.md)**: Single source of truth
-- **[Implementation Spec](docs/KernelForge_Implementation_Spec.md)**: Code-level specification
-- **[STATUS.md](docs/STATUS.md)**: Implementation status and hackathon readiness
-- **[Training Guide](docs/TRAINING_PLAN.md)**: Detailed training instructions
+- **[Final PRD](docs/KERNELFORGE_FINAL_PRD.md)**: Single source of truth — decisions, tasks, architecture
+- **[GRPO Deep Dive](docs/GRPO_DEEP_DIVE.md)**: Training algorithm math and implementation
+- **[DoubleGraph SKILLS](docs/skills/doublegraph_a100.md)**: A100 kernel engineering reference
 - **[skill_a100.md](skill_a100.md)**: Agent optimization rules
+- **[Archive](docs/archive/)**: Previous doc versions and research papers
 
 ## 🏆 Hackathon Strategy
 
@@ -415,14 +415,14 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 - **Team**: KernelForge Team
 - **Email**: team@kernelforge.ai
-- **GitHub**: [OCWC22/H100-Kernel-RL](https://github.com/OCWC22/H100-Kernel-RL)
+- **GitHub**: [OCWC22/A100-Kernel-RL](https://github.com/OCWC22/A100-Kernel-RL)
 - **Discord**: [KernelForge Community](https://discord.gg/kernelforge)
 
 ---
 
 <div align="center">
 
-**"We trained an RL agent to write H100 CUDA kernels that beat a decade of NVIDIA expert code"**
+**"We trained an RL agent to write A100 CUDA kernels that beat a decade of NVIDIA expert code"**
 
 [![OpenEnv](https://img.shields.io/badge/OpenEnv-Challenge-blue)](https://openenv.ai)
 [![Hackathon](https://img.shields.io/badge/Hackathon-SF_2026-purple)](https://shack15.com)
