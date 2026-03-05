@@ -23,21 +23,39 @@ KernelForge-OpenEnv establishes a framework for **Artificial Expert Intelligence
 - **Hardware**: NVIDIA A100 (`sm_80`) by default (configurable)
 - **Speedup**: derived from live `profile_baselines` + `evaluate_kernel` outputs
 - **Correctness**: PAC-reasoning mathematical verification
-- **Training**: 3-stage RL pipeline on B200, all performance reward on A100 (Modal)
+- **Training**: 3-stage RL pipeline on B200 ($6.25/hr), all performance reward on A100 (Modal)
 - **Model**: Qwen3-Coder-Next (80B/3B MoE)
 
 ## 🏗️ Architecture
 
 ```
 KernelForge-OpenEnv/
-├── 🧠 skill_a100.md                    # Agent prompt & optimization rules (default)
-├── 🌐 openenv_env/                      # OpenEnv environment with Modal target GPU
-├── 🏋️ training/                         # SFT + RFT + GRPO pipeline
-├── 📊 verification/                     # PAC verification & NCU profiling
-├── 🔧 kernels/                          # CUDA kernel variants and baselines
-├── 📈 datasets/                         # Training data generation
-├── 🎭 demo/                            # Streamlit hackathon demo
-└── ⚙️ modal_app.py                     # target-GPU serverless functions
+├── skill_a100.md                        # Agent prompt & optimization rules (default)
+├── modal_app.py                         # A100 eval: evaluate_kernel + evaluate_ops6k_kernel
+├── modal_train.py                       # Modal training: stages 1-3 on B200
+├── openenv_env/                         # OpenEnv environment + reward + anti-hack
+│   └── skill_builder.py                 # Dynamic SKILL.md + real A100 expert patterns
+├── training/                            # 3-stage RL: GRPO warmup + RFT + TRLOO-GRPO
+│   ├── custom_grpo_trainer.py           # TRLOOGRPOTrainer (N/(N-1) fix)
+│   ├── multi_turn_rollout.py            # Rollout loop + local compile fast-path
+│   ├── stage1_warmup.py / stage3_grpo.py
+│   ├── cuda_agent_integration.py        # Ops-6K dataset loader
+│   └── curriculum.py                    # 4-phase curriculum with topology-aware graph tasks
+├── datasets/                            # Training datasets
+│   ├── build_combined_dataset.py        # Unified builder: manifest + Ops-6K → combined JSONL
+│   ├── combined_kernelforge.jsonl       # ~6,192 rows (192 doubleGraph + ~6K Ops-6K)
+│   ├── extract_doublegraph_a100.py      # Harvester + shared constants
+│   ├── doublegraph_sft.jsonl            # SFT format (HF messages) for Stage 2
+│   └── integrity.py                     # Dataset validation (3 checks)
+├── skydiscover_integration/             # SkyDiscover evolutionary search bridge
+│   ├── evaluator.py                     # Modal A100 eval bridge for SkyDiscover
+│   ├── initial_kernels/                 # Seed kernels from doubleGraph (adapted)
+│   └── run_evolution.sh                 # Launch script (EvoX + seeds)
+├── evaluation/                          # Eval, ablation, pass@k
+├── verification/                        # PAC verification & NCU profiling
+├── tests/                               # 113 unit tests
+├── scripts/                             # Smoke test + utilities
+└── docs/                                # PRD + GRPO Deep Dive + CLAUDE.md nav hub
 ```
 
 ## 🎯 Key Innovations
@@ -56,8 +74,8 @@ System 3 reasoning with Input Generator (adversarial graphs) and Algorithmic Ver
 
 ### 4. **3-Stage RL Training Pipeline**
 - **Stage 1**: GRPO warm-up (LR=3e-6, T=0.9, 300 steps, easy subset)
-- **Stage 2**: Rejection Fine-Tuning (reward >= 1.0, SFT 3 epochs)
-- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, 10 steps P3 demo, B200 gen + A100 eval)
+- **Stage 2**: Rejection Fine-Tuning (reward >= 0.0, SFT 3 epochs)
+- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, **50 steps, 10 turns, 16K context**, B200 gen + A100 eval)
 
 ## 🚀 Quick Start
 
@@ -87,24 +105,23 @@ modal setup
 uv run streamlit run demo/streamlit_demo.py
 ```
 
-### 🔥 Production Mode (Target GPU Required)
+### Production Mode (Modal GPU Required)
 
 ```bash
-# Target A100 defaults for hackathon runs
-export KERNELFORGE_TARGET_GPU=A100
-export KERNELFORGE_TARGET_ARCH=sm_80
-export KERNELFORGE_MODAL_GPU=A100
-export KERNELFORGE_CUDA_ARCH=sm_80
-export KERNELFORGE_MODAL_APP=kernelforge-a100
-
-# Deploy Modal functions
+# Deploy Modal eval endpoint (A100)
 modal deploy modal_app.py
 
-# Test target GPU features
-modal run modal_app.py::test_a100_features
+# Smoke test on Modal B200 (model load + dataset + generation + eval)
+modal run modal_train.py --stage 0
 
-# Start training
-uv run python training/grpo_train.py
+# Stage 1: GRPO warmup (300 steps on B200)
+modal run modal_train.py --stage 1
+
+# Stage 1: Quick test (10 steps only)
+modal run modal_train.py --stage 1 --max-steps 10
+
+# Stage 3: TRLOO-GRPO (50 steps, 10 turns, requires Stage 2 checkpoint)
+modal run modal_train.py --stage 3
 ```
 
 ## 📊 Current Validation Status
@@ -261,39 +278,52 @@ for (int k = 0; k < TILE_SIZE; k++) {
 }
 ```
 
-## 🏋️ Training Commands
+## Training Commands
 
-### Stage 1: GRPO Warm-up
+All training runs on B200 ($6.25/hr on Modal, 192GB). Eval runs on A100 via Modal.
+
+### Stage 1: GRPO Warm-up (TRLOOGRPOTrainer)
 ```bash
-uv run python training/stage1_warmup.py
+modal run modal_train.py --stage 1            # Full 300 steps
+modal run modal_train.py --stage 1 --max-steps 10  # Quick test
 ```
 
 ### Stage 2: Rejection Fine-Tuning
 ```bash
 uv run python training/rft_filter.py --trajectories 100 --min-reward 1.0
-uv run python training/stage2_rft.py
+modal run modal_train.py --stage 2
 ```
 
 ### Stage 3: TRLOO-augmented GRPO + Curriculum (P3 Demo)
 ```bash
-# 10 steps, G=2, B200 gen + A100 eval, requires Gate G-0.8 pass first
-uv run python training/stage3_grpo.py
+# 10 steps, G=2, TRLOOGRPOTrainer + curriculum, requires Gate G-0.8 pass
+modal run modal_train.py --stage 3
+```
+
+### Local Testing
+```bash
+# Run all tests (113 tests)
+uv run python -m pytest tests/ -q
+
+# Smoke test (no GPU needed)
+uv run python scripts/smoke_test.py
 ```
 
 ### CUDA-Agent Integration
 
-KernelForge now supports loading prompt tasks from:
-- CUDA-Agent repo: https://github.com/BytedTsinghua-SIA/CUDA-Agent
-- CUDA-Agent-Ops-6K dataset: https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K
+Dataset: [CUDA-Agent-Ops-6K](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K) — 6,000 PyTorch operator tasks with reference code for correctness verification and benchmarking.
 
-Integrated behavior:
-- GRPO prompt pool merges local `datasets/wcc_training.jsonl` prompts with CUDA-Agent prompt tasks.
-- RFT prompt pool can be augmented with CUDA-Agent prompt tasks via `CUDA_AGENT_RFT_PROMPTS`.
+### doubleGraph A100 Expert Demonstrations
 
-### Generate Training Data
-```bash
-uv run python datasets/generate_wcc_dataset.py --examples 100
-```
+192 production A100-optimized CUDA kernels extracted from [doubleGraph](https://github.com/OCWC22/doubleGraph) (Apache 2.0):
+- **8 categories**: traversal, components, community, centrality, link_analysis, link_prediction, cores, tree
+- **Topology-aware prompts**: power-law, dense-community, sparse-islands, dense-regular, bipartite
+- **Per-kernel compilation flags**: `--maxrregcount`, `--rdc`, `--extra-device-vectorization`, `-Xptxas -dlcm=ca`
+- **Training formats**: SFT messages (`doublegraph_sft.jsonl`) + combined RL prompts (`combined_kernelforge.jsonl`)
+
+### SkyDiscover Evolutionary Search (Parallel Hedge)
+
+UC Berkeley's [SkyDiscover](https://github.com/SkyDiscover/skydiscover) evolutionary search with AdaEvolve/EvoX algorithms. Seeds from doubleGraph production kernels, evaluates via Modal A100.
 
 ## 🎭 Demo Features
 
@@ -376,13 +406,21 @@ docker run --gpus all -p 8501:8501 kernelforge-openenv
 - [x] OpenEnv environment implementation
 - [x] PAC verification system
 - [x] Baseline kernels and profiling
-- [x] Training pipeline dry run
+- [x] Training pipeline wired end-to-end
+- [x] TRLOOGRPOTrainer (N/(N-1) gradient fix)
+- [x] Local compile fast-path (nvcc syntax check before Modal)
+- [x] Ops-6K evaluation endpoint (evaluate_ops6k_kernel)
+- [x] Modal training app (modal_train.py)
+- [x] All 113 tests passing
 
 ### Day 1 (Build) — 4-Tier Priority
-- [ ] **P0**: Eval pipeline + continuous reward (must work first)
-- [ ] **P1**: SkyDiscover evolutionary search (parallel, primary hedge)
-- [ ] **P2**: SFT warmup (50 examples, >70% compile rate) + SKILL.md context
-- [ ] **P3**: Optional 10-step GRPO demo (only if Gate G-0.8 passes)
+- [x] **P0**: Eval pipeline + continuous reward — DONE (modal_app.py + reward.py)
+- [x] **P0**: doubleGraph A100 dataset extraction — 192 kernels, 84K lines → 3 TRL datasets
+- [x] **P0**: Real A100 expert patterns injected into SKILL.md (7 patterns from production code)
+- [x] **P1**: SkyDiscover evaluator bridge + seed kernels (evaluator.py + wcc_doublegraph.cu)
+- [x] **P2**: Topology-aware curriculum expansion (5 graph problems: BFS, PageRank, WCC, Triangle Count, Louvain)
+- [ ] **P2**: SFT warmup (192 expert demonstrations + >70% compile rate)
+- [ ] **P3**: Optional 50-step GRPO demo (only if Gate G-0.8 passes)
 
 ### Day 2 (Ship)
 - [ ] Final evaluation on large graphs

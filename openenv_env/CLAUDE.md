@@ -2,7 +2,7 @@
 
 ## GPU Split
 
-> All performance reward (speedup, correctness) executes on **A100 via Modal**. B200 only for local compile checks.
+> All performance reward (speedup, correctness) executes on **A100 via Modal**. **B200** ($6.25/hr) for training + local compile checks only.
 > Judges call `step()` first — cache model on startup, warm CUDA context, pre-load tokenizer.
 
 ## OpenEnv Protocol
@@ -10,6 +10,18 @@
 - **NOT Gymnasium**. HTTP client-server protocol.
 - Install: `uv add "openenv-core[core]>=0.2.1"`
 - Server: FastAPI app created via `create_fastapi_app(KernelForgeEnv, ...)`
+
+## Upstream Dataset Contract (training -> env)
+
+The environment now receives prompts originating from a unified dataset pipeline:
+- `datasets/build_combined_dataset.py`
+- `training/dataset_loader.py`
+
+Unified problem fields expected upstream:
+- `prompt`, `ops`, `difficulty`, `data_source`
+- optional: `task_code`, `topology`, `graph_properties`, `kernel_id`, `compile_flags`
+
+This keeps OpenEnv episode payloads consistent across Ops-6K dense ops and doubleGraph topology-aware tasks.
 
 ## KernelForgeEnv (`kernel_forge_env.py`)
 
@@ -27,6 +39,8 @@ class KernelForgeObservation(Observation):
     turn: int = 0
     best_reward: float = -1.0
     info: dict[str, Any]
+    graph_properties: dict[str, Any] | None = None  # Topology context (degree dist, density, etc.)
+    topology_type: str | None = None  # "power-law", "sparse-islands", "dense-regular", etc.
 ```
 
 ### Constructor
@@ -125,6 +139,10 @@ class GPUCachePool:
 LRU eviction. Calls `close()` or `release()` on evicted entries.
 
 Entry type: `GPUCacheEntry(key: str, value: Any, metadata: dict)`
+
+## Nsight Integration — DONE (in compute_reward)
+
+Nsight metrics (occupancy, mem_coalescing, warp_efficiency) are already supported as optional kwargs in `compute_reward()`. When provided, they add bonus: `0.4*occ + 0.3*mem + 0.2*warp`. No separate `reward_nsight.py` needed.
 
 ## Transform Grammar — DEFERRED TO v2
 

@@ -11,17 +11,18 @@
 - **Primary**: Qwen/Qwen3-Coder-Next (80B MoE, 3B active, FP8 on B200 192GB)
 - **Fallback**: Qwen/Qwen2.5-Coder-7B-Instruct
 - **Env vars**: `PRIMARY_MODEL`, `FALLBACK_MODEL` in `model_loader.py`
+- **Note**: `model_loader.py` currently uses NF4 4-bit via bitsandbytes (works on any GPU). Switch to FP8 for B200.
 
 ## Stage Configs
 
 | Param | Stage 1 (`stage1_warmup.py`) | Stage 2 (`stage2_rft.py`) | Stage 3 (`stage3_grpo.py`) |
 |-------|------------------------------|---------------------------|----------------------------|
-| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum (P3 demo) |
+| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum **(optimized per GRPO-15)** |
 | **LR** | 3e-6 | 5e-6 | 5e-6 |
 | **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
-| **G (generations)** | 4 | — | 2 |
-| **Max turns** | 3 | — | 3 |
-| **Steps/Epochs** | 300 steps | 3 epochs | 10 steps (P3 demo) |
+| **G (generations)** | 2 | — | 2 |
+| **Max turns** | 5 | — | **20** (full compile→correct→optimize→tune lifecycle) |
+| **Steps/Epochs** | 300 steps | 3 epochs | **150 steps** (matches CUDA-Agent's 150 on 1 GPU) |
 | **Batch** | 1 × 4 grad_accum | 1 × 4 grad_accum | 1 × 4 grad_accum |
 | **Optimizer** | paged_adamw_8bit | — | paged_adamw_8bit |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
@@ -62,49 +63,105 @@
 
 ### `make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable`
 Returns TRL-compatible `rollout_func(prompt_ids, ...) -> dict` with keys:
-`prompt_ids`, `completion_ids`, `logprobs`, `env_reward`
+`prompt_ids`, `completion_ids`, `logprobs`, `env_reward`. Stage 3 uses `max_turns=10` per GRPO-15 optimized config.
 
 ### Flow per completion:
 1. Generate response on B200 → `extract_cuda_code(text)` extracts ```cuda blocks
-2. `_evaluate_on_modal(code)` → **A100 execution:** compile + correctness verify + benchmark (5 graphs, 50 warmup, 30 runs)
-3. `_compute_reward_from_result(result)` → 2-tier: fast path (log(speedup) from CUDA events), slow path (+ Nsight bonus for top-k)
-4. `_format_feedback(result, reward, turn)` → feedback text for next turn
-5. **Early exit** at reward >= 1.6 (log(5.0), i.e. 5x+ speedup)
+2. **`_local_compile_check(code)`** — nvcc -arch=sm_80 -c syntax check (**IMPLEMENTED**, saves ~50% Modal cost)
+3. If compiles locally → `_evaluate_on_modal(code, task_code)` — **A100 execution:** routes to `evaluate_ops6k_kernel` (Ops-6K) or `evaluate_kernel` (WCC)
+4. `_compute_reward_from_result(result)` → log(speedup) + optional Nsight bonus
+5. `_format_feedback(result, reward, turn)` → feedback text for next turn
+6. **Early exit** at reward >= 1.6 (log(5.0), i.e. 5x+ speedup)
 
-### `reward_from_env(prompts, completions, **kwargs) -> list[float]`
-Single-turn wrapper for Stage 1.
+### `reward_from_env(completions, **kwargs) -> list[float]`
+Single-turn wrapper — extracts env_reward from rollout kwargs.
 
 ## RFT Filter (`rft_filter.py`)
 
 ### `TrajectoryCollector(modal_app_name, model_path)`
 - `collect_trajectories(num_trajectories=100) -> list[dict]`
-- `filter_trajectories(min_reward=1.0) -> list[dict]` (was 2.0, P0-3 fix)
+- `filter_trajectories(min_reward=0.0) -> list[dict]` (revised per GRPO-15: any speedup is useful signal)
 - `save_rft_dataset(filtered, output_path)` → HF messages format
 - Generation: max_new_tokens=2048, temperature=0.7, top_p=0.95
+
+## TRLOO Custom Trainer (`custom_grpo_trainer.py`) — IMPLEMENTED
+
+`TRLOOGRPOTrainer(GRPOTrainer)` — drop-in replacement for TRL's GRPOTrainer. Overrides `_compute_advantages()` to apply N/(N-1) scaling after parent computes vanilla GRPO advantages. Fixes 25% gradient shrinkage (Dr. Kernel, arXiv 2602.05885).
+
+Also provides factory: `create_trloo_trainer(model, tokenizer, reward_funcs, train_dataset, config, rollout_func)`.
 
 ## CUDA Agent Integration (`cuda_agent_integration.py`)
 
 - Dataset: `BytedTsinghua-SIA/CUDA-Agent-Ops-6K`
 - `load_cuda_agent_prompt_dataset(max_samples=1024, seed=42) -> Dataset`
+  - Returns columns: `prompt`, `task_code`, `ops`, `data_source`
+  - `task_code` carries reference PyTorch model for `evaluate_ops6k_kernel`
 - `load_cuda_agent_prompt_texts(max_samples=128, seed=42) -> list[str]`
 - `_build_cuda_prompt(example, max_code_chars=6000) -> str | None`
 
-## Stacked Mitigations (NOT YET IMPLEMENTED)
+## Unified Dataset Pipeline (`datasets/build_combined_dataset.py`, `training/dataset_loader.py`)
 
-These techniques from GRPO Deep Dive are planned but have no code yet:
+- **Builder**: `datasets/build_combined_dataset.py`
+  - Merges doubleGraph manifest tasks + Ops-6K tasks into one problem schema
+  - Output: `datasets/combined_kernelforge.jsonl`
+  - Main APIs:
+    - `build_combined_dataset(...) -> list[dict]`
+    - `inject_into_curriculum(cm, dataset) -> dict[str, int]`
+- **Loader**: `training/dataset_loader.py`
+  - `load_training_dataset(stage="stage1"|"stage2"|"stage3", ...)`
+  - Stage 1: prompt Dataset (easy Ops-6K + doubleGraph base variants)
+  - Stage 2: SFT JSONL rows from `datasets/doublegraph_sft.jsonl`
+  - Stage 3: full combined rows; optional `CurriculumManager` injection
 
-| Technique | Deep Dive Ref | File to Create |
-|-----------|---------------|----------------|
-| MARS+TRLOO credit assignment | GRPO-4 line 1171 | `custom_grpo_loop.py` |
-| Nsight structured rewards | GRPO-9 line 1623 | `hybrid_rollout.py` |
-| CPPO completion pruning | GRPO-11 line 1762 | (in custom_grpo_loop.py) |
-| MASPO soft trust region | GRPO-12 line 1805 | `maspo_loss.py` |
-| ~~Transformation grammar~~ | GRPO-13 line 1849 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
+## doubleGraph A100 Expert Demonstrations (`datasets/`)
+
+Source-of-truth metadata feed:
+- `docs/research/doublegraph/doublegraph_a100_manifest.jsonl` (192 kernels)
+
+Derived training artifacts:
+- `doublegraph_sft.jsonl` — HF messages format for Stage 2 SFT (192 entries)
+- `combined_kernelforge.jsonl` — merged Ops-6K + doubleGraph curriculum pool (~6,192 entries)
+- Legacy files (`doublegraph_a100_kernels.jsonl`, `doublegraph_grpo_prompts.jsonl`) archived to `archive/datasets_legacy/`
+
+Categories: traversal, components, community, centrality, link_analysis, link_prediction, cores, tree.
+Topology-aware prompts: power-law, sparse-islands, dense-regular, dense-community, bipartite.
+Per-kernel compilation flags included in training signal (--maxrregcount, --rdc, etc.).
+
+Harvester: `python3 datasets/extract_doublegraph_a100.py`
+
+## Evolutionary Search — AdaEvolve + EvoX (`skydiscover_integration/`)
+
+Implements SkyDiscover's algorithms natively (no external dependency).
+- `evaluator.py`: `KernelForgeEvaluator` — cascade eval (stage1 local compile → stage2 Modal A100)
+- `adaevolve.py`: `AdaEvolve` — multi-island evolutionary search with UCB1 scheduling
+- `evox_strategies.py`: `EvoXStrategyManager` — self-evolving mutation strategies (LogWindowScorer)
+- Seed kernels in `initial_kernels/` (5 A100 graph kernels from doubleGraph)
+- Launch: `./skydiscover_integration/run_evolution.sh`
+
+## Stacked Mitigations
+
+| Technique | Status | Location |
+|-----------|--------|----------|
+| TRLOO advantage scaling (N/(N-1)) | **DONE** | `custom_grpo_trainer.py` |
+| Local compile fast-path | **DONE** | `multi_turn_rollout.py:_local_compile_check()` |
+| Ops-6K evaluation | **DONE** | `modal_app.py:evaluate_ops6k_kernel()` |
+| Nsight bonus in reward | **DONE** | `reward.py:compute_reward()` (optional kwargs) |
+| Nsight lightweight profiling | **DONE** | `modal_app.py:evaluate_kernel()` (ptxas occupancy) |
+| doubleGraph A100 expert dataset | **DONE** | `datasets/doublegraph_*.jsonl` (192 entries) |
+| Real A100 patterns in SKILL.md | **DONE** | `skill_builder.py:_append_a100_patterns()` |
+| Topology-aware curriculum | **DONE** | `curriculum.py` Phase 2-3 (5 graph problems with graph_properties) |
+| Graph topology in RL observations | **DONE** | `kernel_forge_env.py`, `curriculum.py`, `multi_turn_rollout.py` |
+| Evaluator bridge (cascade eval) | **DONE** | `skydiscover_integration/evaluator.py` |
+| AdaEvolve multi-island search | **DONE** | `skydiscover_integration/adaevolve.py` |
+| EvoX self-evolving strategies | **DONE** | `skydiscover_integration/evox_strategies.py` |
+| MARS return-to-go credit | NOT YET | `custom_grpo_loop.py` (GRPO-4 line 1171) |
+| CPPO completion pruning | NOT YET | (in custom_grpo_loop.py) (GRPO-11 line 1762) |
+| MASPO soft trust region | NOT YET | `maspo_loss.py` (GRPO-12 line 1805) |
+| ~~Transformation grammar~~ | DEFERRED | v2 (GRPO-13 line 1849) |
 
 ## Files to Create
 
-- [ ] `custom_grpo_loop.py` — MARS+TRLOO + CPPO pruning (replaces TRL default loop)
-- [ ] `hybrid_rollout.py` — local fast-path + Modal ncu fallback
+- [ ] `custom_grpo_loop.py` — MARS return-to-go + CPPO pruning
 - [ ] `maspo_loss.py` — soft trust region loss term
 
 ## Abort Conditions
@@ -113,7 +170,7 @@ These techniques from GRPO Deep Dive are planned but have no code yet:
 - reward std = 0 → model collapsed
 - NaN loss → LR too high or gradient explosion
 - OOM → reduce G, batch, or seq_length
-- Gate G-0.8 failure (non-zero gradients + >1.2x on 2/20 kernels) → abandon GRPO, use SFT + SkyDiscover only
+- Gate G-0.8 failure (non-zero gradients + >1.2x on 2/20 kernels) → abandon GRPO, use SFT + AdaEvolve only
 
 ## Deep Dive Pointers
 

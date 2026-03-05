@@ -41,19 +41,21 @@ Unbiased estimator (Chen et al. 2021): `1 - C(n-c, k) / C(n, k)`
 ### `pass_at_k_problems(results, k_values=[1, 5, 10]) -> dict`
 Mean pass@k across problems. Each result: `{"n": int, "c": int}`.
 
-## reward_monitor.py (72 lines)
+## reward_monitor.py (72 lines) — STALE, NEEDS UPDATE
 
 ### `check_reward_distribution(rewards) -> dict`
 Returns: `distribution`, `total`, `mean`, `flags`, `entropy`, `tier_rates`
 
-**Suspicious flags**:
-| Flag | Condition |
-|------|-----------|
-| Likely hacking | >90% at max reward (3.0) |
-| Bimodal/overfitting | only -1 and +3 |
-| Model collapsed | uniform rewards |
-| Cannot generate | no positive rewards |
-| No speedup | max reward <= 1.0 |
+**WARNING**: Still uses old discrete reward thresholds (3.0, -1/+3 bimodal). These flags won't trigger correctly with continuous log(speedup) reward. Needs rewrite for continuous reward distribution analysis.
+
+**Current (stale) flags**:
+| Flag | Condition | Status |
+|------|-----------|--------|
+| Likely hacking | >90% at max reward (3.0) | STALE — rewards are continuous now |
+| Bimodal/overfitting | only -1 and +3 | STALE — no discrete 3.0 tier |
+| Model collapsed | uniform rewards | OK |
+| Cannot generate | no positive rewards | OK |
+| No speedup | max reward <= 1.0 | STALE — log(1.0)=0, should check <=0 |
 
 ## verification/pac_verify.py (225 lines)
 
@@ -85,20 +87,39 @@ NCU sections profiled: ComputeWorkloadAnalysis, MemoryWorkloadAnalysis, LaunchSt
 
 CLI args: `--kernel` (required), `--baseline`, `--ncu`, `--warmup` (100), `--runs` (50), `--graph-size` (10000)
 
-## modal_app.py (457 lines, project root)
+## modal_app.py (project root)
 
 ### Modal Functions (GPU=A100, app="kernelforge-a100")
 
-| Function | Timeout | Description |
-|----------|---------|-------------|
-| `evaluate_kernel(payload)` | 120s | Compile + PAC verify + benchmark |
-| `profile_baselines()` | 300s | Baseline timing (original + doublegraph) |
-| `test_h100_features()` | 60s | GPU feature detection |
-| `evaluate_kernels_batch(payloads)` | 600s | Batch evaluation |
+| Function | Timeout | Description | Status |
+|----------|---------|-------------|--------|
+| `evaluate_kernel(payload)` | 120s | Compile + PAC verify + benchmark (WCC) | Existing |
+| `evaluate_ops6k_kernel(payload)` | 120s | Compile + verify + benchmark (Ops-6K) | **NEW** |
+| `profile_baselines()` | 300s | Original + doublegraph timing | Existing |
+| `test_h100_features()` | 60s | GPU feature detection | Existing |
+| `evaluate_kernels_batch(payloads)` | 600s | Batch evaluation | Existing |
 
-`evaluate_kernel` payload: `cuda_code`, `verify_graphs=5`, `warmup_iters=50`, `benchmark_runs=30`, `baseline_original_ms`, `baseline_doublegraph_ms`
+`evaluate_ops6k_kernel` payload: `cuda_code`, `task_code` (reference PyTorch model), `warmup_iters=10`, `benchmark_runs=10`
 
-Returns: `compiles`, `correct`, `verifier_msg`, `runtime_ms` (median), `speedup_vs_orig`, `speedup_vs_dg`, `error`
+Returns: `compiles`, `correct`, `speedup_vs_orig`, `speedup_vs_dg`, `runtime_ms`, `error`
+
+## modal_train.py (project root) — NEW
+
+Modal training app. Runs 3-stage pipeline on B200 ($6.25/hr, 192GB).
+- `modal run modal_train.py --stage 0` — smoke test
+- `modal run modal_train.py --stage 1 --max-steps 10` — Stage 1 warmup
+- `modal run modal_train.py --stage 3` — Stage 3 GRPO demo
+
+## Eval Strategy
+
+| Component | Status | Location |
+|-----------|--------|----------|
+| Local nvcc compile fast-path | **DONE** | `training/multi_turn_rollout.py:_local_compile_check()` |
+| Modal eval (WCC) | **DONE** | `modal_app.py:evaluate_kernel()` |
+| Modal eval (Ops-6K) | **DONE** | `modal_app.py:evaluate_ops6k_kernel()` |
+| Nsight bonus in reward | **DONE** | `openenv_env/reward.py:compute_reward()` |
+| CPPO cheap_cuda_score pre-filter | NOT YET | GRPO-11 line 1762 |
+| Full hybrid turn-escalation | NOT YET | GRPO-10 line 1355 |
 
 ## CPPO Heuristic (NOT YET IMPLEMENTED)
 
@@ -111,24 +132,6 @@ Scoring rules (from deep dive):
 - Has `threadIdx`/`blockIdx` → +1
 - Compiles locally with nvcc → +2
 - Score < threshold → skip Modal eval
-
-## Nsight Reward Formula (NOT YET IMPLEMENTED)
-
-See GRPO-9, `GRPO_DEEP_DIVE.md` line 1276.
-- Extract: `sm__throughput.avg.pct_of_peak_sustained_elapsed`, `dram__throughput`, occupancy
-- Bonus = weighted combination [0, 0.5] added to discrete reward
-- **File to create**: `reward_nsight.py`
-
-## Hybrid Eval Strategy (from GRPO-10, line 1355)
-
-Turn-by-turn escalation:
-1. **Turn 1-2**: Local nvcc compile check only (fast, free)
-2. **Turn 3**: Local + PAC verification (5 test graphs)
-3. **Turn 4+**: Modal + ncu profiling (expensive, accurate)
-
-## Files to Create
-
-- [ ] `reward_nsight.py` — Nsight Compute continuous bonus reward
 
 ## Deep Dive Pointers
 

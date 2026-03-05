@@ -31,9 +31,9 @@ EXPECTED_TRUTH_FILES = [
     "training/stage2_rft.py",
     "training/stage3_grpo.py",
     "training/curriculum.py",
-    "datasets/download_ops6k.py",
-    "datasets/curate_subset.py",
-    "datasets/compute_baselines.py",
+    "datasets/build_combined_dataset.py",
+    "datasets/extract_doublegraph_a100.py",
+    "datasets/integrity.py",
     "evaluation/eval_model.py",
     "evaluation/ablation.py",
     "tests/test_env.py",
@@ -338,7 +338,7 @@ def build_markdown(signals: list[DocSignals], snapshot: dict) -> str:
     lines.append("")
     lines.append("### P0 — Must complete before hackathon run")
     lines.append("1. Implement missing training entrypoints (`model_loader.py`, `stage1_warmup.py`, `stage2_rft.py`, `stage3_grpo.py`).")
-    lines.append("2. Implement dataset utilities (`download_ops6k.py`, `curate_subset.py`, `compute_baselines.py`).")
+    lines.append("2. Build combined dataset (`build_combined_dataset.py` — merges doubleGraph + Ops-6K).")
     lines.append("3. Add local truth-style OpenEnv path (non-Modal) as an executable option.")
     lines.append("4. Add evaluation scripts (`evaluation/eval_model.py`, `evaluation/ablation.py`).")
     lines.append("5. Add smoke tests for reward/env/compile interfaces.")

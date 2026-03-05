@@ -99,20 +99,17 @@ def evaluate_checkpoint(checkpoint_path: str, num_problems: int = EVAL_PROBLEMS)
 
 
 def _load_eval_prompts(num_problems: int) -> list[str]:
-    """Load evaluation prompts from curated dataset or generate fallback."""
-    curated_path = "datasets/curated_200.jsonl"
-    if os.path.exists(curated_path):
-        with open(curated_path) as f:
+    """Load evaluation prompts from combined dataset or generate fallback."""
+    combined_path = "datasets/combined_kernelforge.jsonl"
+    if os.path.exists(combined_path):
+        with open(combined_path) as f:
             all_problems = [json.loads(line) for line in f]
         # Use last N as held-out eval set
         eval_set = all_problems[-num_problems:]
-        return [
-            f"Write a CUDA kernel for {TARGET_GPU} ({TARGET_ARCH}) that implements: {p.get('ops', 'unknown')}"
-            for p in eval_set
-        ]
+        return [str(p.get("prompt", "")) for p in eval_set if p.get("prompt")]
 
     print(
-        f"WARNING: {curated_path} not found. Run 'python datasets/curate_subset.py' first "
+        f"WARNING: {combined_path} not found. Run 'python datasets/build_combined_dataset.py' first "
         "for proper evaluation. Falling back to minimal built-in prompts."
     )
     return [

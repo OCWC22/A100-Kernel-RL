@@ -1,11 +1,46 @@
 # docs/ — Navigation Hub & Project Quick-Reference
 
+## Modal GPU Pricing (as of March 5, 2026)
+
+Per-second billing, no minimum. $30/month free credits on Starter plan.
+
+| GPU | VRAM | Arch | $/second | $/hour | Use Case |
+|-----|------|------|----------|--------|----------|
+| H200 | 141 GB HBM3e | sm_90 | $0.001261 | $4.54 | Training (alternative — fits but tight, ~41GB free) |
+| **B200** | 192 GB HBM3e | sm_100 | $0.001736 | **$6.25** | **Training** (primary — FP8, 80B fits with ~92GB free) |
+| H100 | 80 GB HBM3 | sm_90a | $0.001097 | $3.95 | ❌ Cannot fit 80B FP8 (~100GB > 80GB VRAM) |
+| RTX PRO 6000 | 48 GB GDDR7 | ada | $0.000842 | $3.03 | Inference |
+| **A100 80GB** | 80 GB HBM2e | sm_80 | $0.000694 | **$2.50** | **Eval/reward** (target GPU) |
+| A100 40GB | 40 GB HBM2e | sm_80 | $0.000583 | $2.10 | Eval (budget) |
+| L40S | 48 GB GDDR6 | ada | $0.000542 | $1.95 | Inference |
+| A10 | 24 GB GDDR6 | sm_86 | $0.000306 | $1.10 | Light inference |
+| L4 | 24 GB GDDR6 | ada | $0.000222 | $0.80 | Light inference |
+| T4 | 16 GB GDDR6 | sm_75 | $0.000164 | $0.59 | Cheapest |
+
+### KernelForge Cost Estimate (Match Config)
+
+| Component | GPU | Hours | $/hr | Cost |
+|-----------|-----|-------|------|------|
+| Stage 1 warmup (300 steps, 5 turns) | B200 | 3.5 | $6.25 | $21.88 |
+| Stage 2 RFT | B200 | 0.5 | $6.25 | $3.13 |
+| Stage 3 GRPO (150 steps, 20 turns) | B200 | 10.0 | $6.25 | $62.50 |
+| Eval calls (~1,200 calls) | A100 80GB | 10.0 | $2.50 | $25.00 |
+| Best-of-8 inference + SkyDiscover | A100 80GB | 7.2 | $2.50 | $18.00 |
+| Testing/debugging | B200 | 4.0 | $6.25 | $25.00 |
+| **Total** | | **~35** | | **$155.51** |
+| **After $30 free credit** | | | | **$125.51** |
+| **vs CUDA-Agent (128× H20)** | | | | **~$5,000-10,000+** |
+
+Source: [modal.com/pricing](https://modal.com/pricing), [B200 pricing blog](https://modal.com/blog/nvidia-b200-pricing)
+
+---
+
 ## Active Documents
 
 | File | Lines | Size | Content |
 |------|-------|------|---------|
-| `KERNELFORGE_FINAL_PRD.md` | 1,457 | 80KB | Single source of truth — replaces all previous docs |
-| `GRPO_DEEP_DIVE.md` | 2,075 | 81KB | Algorithm math, memory budgets, stacked mitigations |
+| `KERNELFORGE_FINAL_PRD.md` | ~1,560 | ~86KB | Single source of truth — replaces all previous docs (Section 7 added: feasibility assessment) |
+| `GRPO_DEEP_DIVE.md` | ~2,175 | ~86KB | Algorithm math, memory budgets, stacked mitigations (GRPO-15 added: optimized config) |
 
 ## PRD Section Map (`KERNELFORGE_FINAL_PRD.md`)
 
@@ -27,6 +62,17 @@
 | 6.6 | 1410 | Decision Gates (Go/No-Go) |
 | 6.7 | 1425 | Realistic Timeline (with failure buffer) |
 | 6.8 | 1447 | Minimum Viable Submission |
+| **7** | **~1512** | **Feasibility Assessment: Matching CUDA-Agent on Single B200** |
+| 7.1 | ~1516 | CUDA-Agent Benchmark (The Target) |
+| 7.2 | ~1528 | CUDA-Agent Ablation (What Drives Performance) |
+| 7.3 | ~1540 | KernelForge vs CUDA-Agent Comparison |
+| 7.4 | ~1562 | Per-Metric Assessment (Training + Inference tiers) |
+| 7.5 | ~1600 | Match Configuration: Full Stack on Single B200 |
+| 7.6 | ~1675 | Expected Results (Match Configuration) |
+| 7.7 | ~1690 | Smaller Models Analysis |
+| 7.8 | ~1700 | Data Efficiency: Why 6,000 Samples Match 153,600 |
+| 7.9 | ~1740 | Bottom Line |
+| 7.10 | ~1755 | MARS+TRLOO+CPPO for CUDA Kernel Generation |
 
 ## GRPO Deep Dive Section Map (`GRPO_DEEP_DIVE.md`)
 
@@ -46,6 +92,7 @@
 | GRPO-12 | 1805 | MASPO Soft Trust Region |
 | GRPO-13 | 1849 | Transformation Grammar (40 Rules) — DEFERRED TO v2 |
 | GRPO-14 | 1978 | Full Stacked Architecture (Single-GPU Hackathon) |
+| **GRPO-15** | **~2104** | **Optimized Single-B200 Config (Matching CUDA-Agent)** |
 
 ---
 
@@ -53,22 +100,28 @@
 
 **Model**: Qwen/Qwen3-Coder-Next (80B MoE, 3B active, FP8 on B200 192GB), fallback Qwen/Qwen2.5-Coder-7B-Instruct
 
-> **GPU Split:** B200 = model weights + generation + gradient updates + local compile checks. **A100 (Modal) = all performance reward** (speedup timing, execution correctness, Nsight profiling). B200 timing ≠ A100 timing.
+> **GPU Split:** **B200** ($6.25/hr) = model weights + generation + gradient updates + local compile checks. H100 (80GB) cannot fit the model. **A100 (Modal) = all performance reward** (speedup timing, execution correctness, Nsight profiling). B200 timing ≠ A100 timing.
 
 ### Stage Configs
 
 | Param | Stage 1 (`stage1_warmup.py`) | Stage 2 (`stage2_rft.py`) | Stage 3 (`stage3_grpo.py`) |
 |-------|------------------------------|---------------------------|----------------------------|
-| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum (P3 demo) |
+| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum **(optimized per GRPO-15)** |
+| **Trainer** | `TRLOOGRPOTrainer` | SFTTrainer | `TRLOOGRPOTrainer` |
 | **LR** | 3e-6 | 5e-6 | 5e-6 |
 | **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
-| **G (generations)** | 4 | — | 2 |
-| **Max turns** | 3 | — | 3 |
-| **Steps/Epochs** | 300 steps | 3 epochs | 10 steps (P3 demo) |
+| **G (generations)** | 2 | — | 2 |
+| **Max turns** | 5 | — | **20** (full compile→correct→optimize→tune lifecycle) |
+| **Steps/Epochs** | 300 steps | 3 epochs | **150 steps** (matches CUDA-Agent's 150 on 1 GPU) |
+| **Context** | 8,192 | — | **32,768** (20 turns × ~1.5K/turn; B200 92GB-40GB=52GB free) |
 | **Batch** | 1 x 4 grad_accum | 1 x 4 grad_accum | 1 x 4 grad_accum |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
 
-Shared: bf16=True, max_prompt=512, max_completion=4096, top_k=50, top_p=0.95, rep_penalty=1.05, vllm colocate
+Shared: bf16=True, max_prompt=512, top_k=50, top_p=0.95, rep_penalty=1.05, vllm colocate
+
+### TRLOO Custom Trainer (`custom_grpo_trainer.py`) — IMPLEMENTED
+
+`TRLOOGRPOTrainer(GRPOTrainer)` — drop-in replacement that applies N/(N-1) TRLOO advantage scaling after parent computes vanilla GRPO advantages. Fixes the 25% gradient shrinkage from Dr. Kernel (arXiv 2602.05885). Used by both Stage 1 and Stage 3.
 
 ### LoRA (`model_loader.py`)
 
@@ -80,36 +133,128 @@ r=16, alpha=16, dropout=0, max_seq=8192, nf4 4-bit double_quant bf16. MoE target
 |-------|------|---------------|----------|
 | 0 | `single_ops` | 1.0 | vector_add, relu, softmax, matmul, gelu |
 | 1 | `fusion_2op` | 2.0 | LayerNorm+ReLU, MatMul+BiasAdd, Softmax+Dropout, Conv2d+BatchNorm |
-| 2 | `arch_specific` | 2.0 | WCC, reduce_sum, GEMM, attention |
-| 3 | `advanced` | 3.0 | LayerNorm+GELU+Linear, Flash-Attention, Batched SpMV |
+| 2 | `arch_specific` | 2.0 | WCC, reduce_sum, GEMM, attention, **+ BFS (power-law), PageRank (dense-regular), WCC (sparse-islands)** |
+| 3 | `advanced` | 3.0 | LayerNorm+GELU+Linear, Flash-Attention, Batched SpMV, **+ Triangle Count (dense-community), Louvain (dense-community)** |
 
-Window=10, promote >50%, demote <20%
+Window=10, promote >50%, demote <20%. Phase 2-3 include topology-aware graph problems from doubleGraph with specific graph structure descriptions.
 
 ### Multi-Turn Rollout (`multi_turn_rollout.py`)
 
-`make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. B200 generates, Modal A100 evaluates (5 graphs, 50 warmup, 30 runs). 2-tier reward: fast path (CUDA events + correctness) for all, slow path (Nsight ncu) for top-k. Early exit at reward>=1.6 (log(5.0), i.e. 5x+ speedup). Single-turn wrapper: `reward_from_env(prompts, completions, **kwargs) -> list[float]`.
+`make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. Stage 3 uses `max_turns=10` per GRPO-15 optimized config.
+
+Flow: generate → `extract_cuda_code()` → `_local_compile_check()` (nvcc syntax, **IMPLEMENTED**) → `_evaluate_on_modal()` (supports both WCC via `evaluate_kernel` and Ops-6K via `evaluate_ops6k_kernel`) → `_compute_reward_from_result()` → `_format_feedback()`. Early exit at reward>=1.6 (log(5.0), i.e. 5x+ speedup).
+
+Local compile fast-path: `nvcc -arch=sm_80 -c` syntax check before Modal. Fails ~50% of early kernels for free, saves A100 eval cost.
+
+Single-turn wrapper: `reward_from_env(completions, **kwargs) -> list[float]`.
 
 ### RFT Filter (`rft_filter.py`)
 
-`TrajectoryCollector(modal_app_name, model_path)` — `collect_trajectories(n=100)`, `filter_trajectories(min_reward=1.0)`, `save_rft_dataset()`. Generation: max_new_tokens=2048, T=0.7, top_p=0.95.
+`TrajectoryCollector(modal_app_name, model_path)` — `collect_trajectories(n=100)`, `filter_trajectories(min_reward=0.0)` (revised per GRPO-15: any speedup is useful signal), `save_rft_dataset()`. Generation: max_new_tokens=2048, T=0.7, top_p=0.95.
 
 ### CUDA Agent (`cuda_agent_integration.py`)
 
-Dataset: `BytedTsinghua-SIA/CUDA-Agent-Ops-6K`. `load_cuda_agent_prompt_dataset(max_samples=1024, seed=42)`, `load_cuda_agent_prompt_texts(max_samples=128)`.
+Dataset: `BytedTsinghua-SIA/CUDA-Agent-Ops-6K`. `load_cuda_agent_prompt_dataset(max_samples=1024, seed=42)` — returns Dataset with columns: `prompt`, `task_code`, `ops`, `data_source`. The `task_code` column carries the reference PyTorch model code needed by `evaluate_ops6k_kernel`.
 
-### Stacked Mitigations (NOT YET IMPLEMENTED)
+### Combined Dataset Pipeline (`datasets/build_combined_dataset.py`)
 
-| Technique | Deep Dive Ref | File to Create |
-|-----------|---------------|----------------|
-| MARS+TRLOO credit assignment | GRPO-4 line 1171 | `training/custom_grpo_loop.py` |
-| Nsight structured rewards | GRPO-9 line 1623 | `training/hybrid_rollout.py` |
-| CPPO completion pruning | GRPO-11 line 1762 | (in custom_grpo_loop.py) |
-| MASPO soft trust region | GRPO-12 line 1805 | `training/maspo_loss.py` |
-| ~~Transformation grammar~~ | GRPO-13 line 1849 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
+Merges:
+- `docs/research/doublegraph/doublegraph_a100_manifest.jsonl` (192 doubleGraph A100 kernels, metadata-first)
+- `BytedTsinghua-SIA/CUDA-Agent-Ops-6K` (~6,000 ops tasks)
+
+Unified row schema:
+- `prompt`, `ops`, `difficulty`, `data_source`
+- optional: `task_code`, `topology`, `graph_properties`, `kernel_id`, `compile_flags`, `expert_code`
+
+Output artifact:
+- `datasets/combined_kernelforge.jsonl` (~6,192 rows)
+
+Curriculum integration helper:
+- `inject_into_curriculum(cm, dataset)` routes by difficulty:
+  - 1 → `single_ops`
+  - 2 → `fusion_2op`
+  - 3 → `arch_specific`
+  - 4 → `advanced`
+
+### Stage-Aware Loader (`training/dataset_loader.py`)
+
+`load_training_dataset(stage, ...)`:
+- `stage1` → prompt `Dataset` (easy Ops-6K + doubleGraph base variants)
+- `stage2` → `doublegraph_sft.jsonl` rows
+- `stage3` → full combined rows (+ optional curriculum injection)
+
+`training/stage1_warmup.py` and `training/stage3_grpo.py` now use this loader path.
+
+### doubleGraph A100 Dataset (`datasets/`)
+
+192 production A100-optimized CUDA kernels. Source of truth: `docs/research/doublegraph/doublegraph_a100_manifest.jsonl`.
+
+| File | Format | Entries | Use |
+|------|--------|---------|-----|
+| `combined_kernelforge.jsonl` | Unified (prompt + ops + difficulty + topology) | ~6,192 | Stages 1 & 3 (via curriculum) |
+| `doublegraph_sft.jsonl` | HF messages (system/user/assistant) | 192 | Stage 2 SFT |
+
+Categories: traversal(20), components(6), link_analysis(32), community(42), centrality(32), link_prediction(48), cores(8), tree(4).
+Topologies: power-law(20), sparse-islands(18), dense-regular(64), dense-community(42), bipartite(48).
+
+Legacy files archived to `archive/datasets_legacy/`.
+
+### Evolutionary Search — AdaEvolve + EvoX (`skydiscover_integration/`)
+
+Implements SkyDiscover's two algorithms natively (no external dependency):
+
+**Evaluator bridge** (`evaluator.py`): `KernelForgeEvaluator` — cascade eval on Modal A100.
+- `evaluate_stage1(code)`: local nvcc compile check (fast, ~50% filter)
+- `evaluate_stage2(code)`: full Modal A100 benchmark (accurate timing + correctness)
+- `evaluate_program(code, id)`: async cascade entry point
+- `evaluate(path)`: sync file-based interface
+
+**AdaEvolve** (`adaevolve.py`): Multi-island evolutionary search with UCB scheduling.
+- 4 islands: register_pressure, memory_coalescing, warp_divergence, occupancy_tuning
+- UCB1 selects which island gets eval budget
+- Paradigm breakthroughs (2x+ improvement) broadcast to all islands
+
+**EvoX** (`evox_strategies.py`): Self-evolving mutation strategies.
+- `LogWindowScorer`: tracks improvement velocity per strategy
+- Stagnation detection → strategy evolution (hybrid strategies from top performers)
+- Hot-swappable strategy database with 4 pre-defined hybrid templates
+
+Seed kernels in `initial_kernels/`: 5 A100 graph kernels (wcc, bfs, pagerank, triangle_count, louvain).
+
+Launch: `./skydiscover_integration/run_evolution.sh` (uses AdaEvolve, not external SkyDiscover).
+
+### Modal Training (`modal_train.py`, project root) — IMPLEMENTED
+
+Runs stages on Modal cloud GPU. Default: B200 ($6.25/hr, 192GB). Image: CUDA 12.4 + torch + trl[vllm]==0.29.0 + transformers + peft + flash-attn.
+
+- `modal run modal_train.py --stage 0` — smoke test (model load, dataset, generation, eval endpoint)
+- `modal run modal_train.py --stage 1 --max-steps 10` — Stage 1 warmup
+- `modal run modal_train.py --stage 3` — Stage 3 GRPO demo
+
+### Stacked Mitigations
+
+| Technique | Status | Location |
+|-----------|--------|----------|
+| TRLOO advantage scaling (N/(N-1)) | **DONE** | `custom_grpo_trainer.py` |
+| Local compile fast-path | **DONE** | `multi_turn_rollout.py:_local_compile_check()` |
+| Ops-6K evaluation | **DONE** | `modal_app.py:evaluate_ops6k_kernel()` |
+| Nsight bonus in reward | **DONE** | `reward.py:compute_reward()` (optional kwargs) |
+| Nsight lightweight profiling | **DONE** | `modal_app.py:evaluate_kernel()` (ptxas occupancy + warp info) |
+| doubleGraph A100 expert dataset | **DONE** | `datasets/doublegraph_*.jsonl` (192 entries) |
+| Real A100 patterns in SKILL.md | **DONE** | `skill_builder.py:_append_a100_patterns()` (7 patterns) |
+| Topology-aware curriculum | **DONE** | `curriculum.py` Phase 2-3 (5 graph problems with graph_properties) |
+| Graph topology in RL observations | **DONE** | `kernel_forge_env.py`, `curriculum.py`, `multi_turn_rollout.py` |
+| Evaluator bridge (cascade eval) | **DONE** | `skydiscover_integration/evaluator.py` |
+| AdaEvolve multi-island search | **DONE** | `skydiscover_integration/adaevolve.py` (UCB + breakthrough) |
+| EvoX self-evolving strategies | **DONE** | `skydiscover_integration/evox_strategies.py` (LogWindowScorer) |
+| MARS return-to-go credit | NOT YET | `training/custom_grpo_loop.py` (GRPO-4) |
+| CPPO completion pruning | NOT YET | (in custom_grpo_loop.py) (GRPO-11) |
+| MASPO soft trust region | NOT YET | `training/maspo_loss.py` (GRPO-12) |
+| ~~Transformation grammar~~ | DEFERRED | v2 — use CUDA-Agent SKILL.md instead (GRPO-13) |
 
 ### Abort Conditions
 
-reward=-1 after 30 steps (dataset issue), std=0 (collapsed), NaN loss (LR too high), OOM (reduce G/batch/seq), Gate G-0.8 failure (non-zero gradients + >1.2x on 2/20 kernels) → abandon GRPO, use SFT + SkyDiscover only
+reward=-1 after 30 steps (dataset issue), std=0 (collapsed), NaN loss (LR too high), OOM (reduce G/batch/seq), Gate G-0.8 failure (non-zero gradients + >1.2x on 2/20 kernels) → abandon GRPO, use SFT + AdaEvolve only
 
 ---
 
@@ -121,7 +266,7 @@ reward=-1 after 30 steps (dataset issue), std=0 (collapsed), NaN loss (LR too hi
 
 ```
 KernelForgeAction(Action):   cuda_code: str
-KernelForgeObservation(Observation): text, baseline_original_ms, baseline_doublegraph_ms, hardware, turn, best_reward, info
+KernelForgeObservation(Observation): text, baseline_original_ms, baseline_doublegraph_ms, hardware, turn, best_reward, info, graph_properties, topology_type
 ```
 
 `reset(seed, episode_id) -> Observation` / `step(action, timeout_s) -> Observation` — dispatches to Modal evaluate_kernel (5 graphs, 50 warmup, 30 runs)
@@ -138,7 +283,7 @@ KernelForgeObservation(Observation): text, baseline_original_ms, baseline_double
 | log(speedup) | fast path: CUDA events timing on A100 + execution correctness |
 | log(speedup) + nsight_bonus | slow path (top-k): + 0.4*occ + 0.3*mem + 0.2*warp from Nsight ncu |
 
-Plus `trloo_post_process(advantages, n)` for N/(N-1) gradient correction (apply if Dr. Kernel derivation confirms; else vanilla GRPO with tight gates).
+`trloo_post_process(advantages, n)` — N/(N-1) gradient correction. **Applied** via `TRLOOGRPOTrainer._compute_advantages()` in Stages 1 & 3.
 
 ### Anti-Hack (`anti_hack.py`)
 
@@ -157,7 +302,18 @@ Allowed CU_FLAGS: `--use_fast_math`, `--extra-device-vectorization`, `--rdc=true
 
 ### Skill Builder (`skill_builder.py`)
 
-`build_skill_md(gpu="a100")` priority: env var `KERNELFORGE_SKILL_FILE` > static `skill_{gpu}.md` > dynamic from registry
+`build_skill_md(gpu="a100")` priority: env var `KERNELFORGE_SKILL_FILE` > static `skill_{gpu}.md` > dynamic from registry.
+
+For A100, appends 7 real expert patterns via `_append_a100_patterns()`:
+1. Degree-based kernel dispatch (warp-cooperative vs thread-per-vertex)
+2. Warp-level shared-memory hash tables (atomicCAS per-slot)
+3. Zero-copy convergence flag (cudaHostAlloc + cudaHostGetDevicePointer)
+4. Bitmap frontier for BFS / direction-optimizing traversal
+5. Path-halving Union-Find (lock-free, no atomics)
+6. Compilation flag tuning by algorithm class (maxrregcount, rdc, dlcm)
+7. __launch_bounds__ for register control
+
+Output: 178 lines / 7.5KB for A100 (vs 55 lines for H100/B200).
 
 ### CachePool (`cache_pool.py`)
 
@@ -166,7 +322,7 @@ Allowed CU_FLAGS: `--use_fast_math`, `--extra-device-vectorization`, `--rdc=true
 ### NOT YET IMPLEMENTED
 
 - ~~`transform_grammar.py`~~ — DEFERRED to v2
-- `reward_nsight.py` — Nsight metrics integration (occupancy, coalescing, warp efficiency) into continuous reward
+- ~~`reward_nsight.py`~~ — Nsight bonus already in `compute_reward()` as optional kwargs; separate file not needed
 
 ---
 
@@ -200,23 +356,32 @@ H1: multi-stage > base. H2: RFT necessary (skip → collapse). H3: SKILL.md > ge
 
 `H100Profiler(kernel_path)` — `profile_baseline()`, `profile_kernel(warmup=50, runs=30, ncu=False, size=10000)`, `generate_report()`. NCU sections: Compute/Memory WorkloadAnalysis, LaunchStats, MemoryTopology, SMActivity.
 
-### modal_app.py (457 lines, project root)
+### modal_app.py (project root)
 
 | Function | Timeout | Purpose |
 |----------|---------|---------|
-| `evaluate_kernel(payload)` | 120s | Compile + PAC verify + benchmark |
+| `evaluate_kernel(payload)` | 120s | Compile + PAC verify + benchmark (WCC) |
+| `evaluate_ops6k_kernel(payload)` | 120s | **NEW** — Compile + verify + benchmark (Ops-6K tasks) |
 | `profile_baselines()` | 300s | Original + doublegraph timing |
 | `test_h100_features()` | 60s | GPU feature detection |
 | `evaluate_kernels_batch(payloads)` | 600s | Batch evaluation |
 
-### Hybrid Eval Strategy (GRPO-10 line 1714)
+`evaluate_ops6k_kernel` receives `cuda_code` + `task_code` (reference PyTorch model from Ops-6K), compiles via `torch.utils.cpp_extension.load()`, verifies correctness with `atol/rtol=1e-2`, profiles baseline vs torch.compile vs CUDA extension.
 
-Turn 1-2: local nvcc only. Turn 3: local + PAC verify. Turn 4+: Modal + ncu.
+### modal_train.py (project root) — IMPLEMENTED
+
+Modal training app. Runs 3-stage pipeline on B200 ($6.25/hr, 192GB). Smoke test, dry run, and full training modes.
+
+### Eval Strategy
+
+- **Local fast-path** (IMPLEMENTED): `nvcc -arch=sm_80 -c` syntax check in `multi_turn_rollout.py` before Modal eval. Fails non-compiling kernels for free.
+- **Modal eval**: Full compile + correctness verify + benchmark on A100.
+- **Hybrid escalation** (NOT YET): Turn-based ncu escalation (GRPO-10).
 
 ### NOT YET IMPLEMENTED
 
-- Nsight metrics integration into Modal eval endpoint (occupancy, coalescing, warp efficiency passed to continuous reward)
 - CPPO `cheap_cuda_score()` pre-filter (GRPO-11 line 1762): +1 for __global__, +1 __shared__, +1 threadIdx/blockIdx, +2 local nvcc compile; skip Modal if below threshold
+- `reward_monitor.py` uses stale discrete reward thresholds (3.0, -1/+3 bimodal) — needs update for continuous log(speedup)
 
 ---
 

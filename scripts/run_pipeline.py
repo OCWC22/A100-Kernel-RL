@@ -8,7 +8,7 @@ Usage:
     python scripts/run_pipeline.py --eval-only  # Just run evaluation
 
 Pipeline stages:
-    0. Data preparation  (download Ops-6K, curate 200 problems, compute baselines)
+    0. Data preparation  (build combined dataset from manifest + Ops-6K)
     1. GRPO warm-up      (training/stage1_warmup.py)
     2. RFT + SFT         (training/stage2_rft.py)
     3. GRPO + curriculum  (training/stage3_grpo.py)
@@ -31,8 +31,7 @@ TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 MODAL_APP = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 
-CURATED_PATH = os.getenv("KERNELFORGE_CURATED_PATH", "datasets/curated_200.jsonl")
-BASELINES_PATH = os.getenv("KERNELFORGE_BASELINES_PATH", "datasets/baselines.jsonl")
+COMBINED_PATH = os.getenv("KERNELFORGE_COMBINED_PATH", "datasets/combined_kernelforge.jsonl")
 
 STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stage1")
 STAGE2_OUTPUT = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
@@ -43,25 +42,10 @@ STAGE3_OUTPUT = os.getenv("KERNELFORGE_STAGE3_OUTPUT", "outputs/kernelforge-stag
 
 STEPS = [
     {
-        "name": "0a. Download CUDA-Agent-Ops-6K",
+        "name": "0. Build combined dataset (doubleGraph + Ops-6K)",
         "stage": 0,
-        "check": lambda: _dataset_cached(),
-        "cmd": [sys.executable, "-c",
-                "from datasets import load_dataset; "
-                "load_dataset('BytedTsinghua-SIA/CUDA-Agent-Ops-6K'); "
-                "print('Dataset cached.')"],
-    },
-    {
-        "name": "0b. Curate 200-problem subset",
-        "stage": 0,
-        "check": lambda: os.path.exists(CURATED_PATH),
-        "cmd": [sys.executable, "datasets/curate_subset.py"],
-    },
-    {
-        "name": "0c. Compute per-problem baselines on Modal",
-        "stage": 0,
-        "check": lambda: os.path.exists(BASELINES_PATH),
-        "cmd": [sys.executable, "datasets/compute_baselines.py"],
+        "check": lambda: os.path.exists(COMBINED_PATH),
+        "cmd": [sys.executable, "datasets/build_combined_dataset.py"],
     },
     {
         "name": "1. GRPO warm-up (Stage 1)",
@@ -88,16 +72,6 @@ STEPS = [
         "cmd": [sys.executable, "-m", "evaluation.compare_stages"],
     },
 ]
-
-
-def _dataset_cached() -> bool:
-    """Check if Ops-6K is in HuggingFace cache."""
-    try:
-        from datasets import load_dataset
-        load_dataset("BytedTsinghua-SIA/CUDA-Agent-Ops-6K", split="train[:1]")
-        return True
-    except Exception:
-        return False
 
 
 def _run_step(step: dict, dry_run: bool = False) -> bool:
