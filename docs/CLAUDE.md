@@ -4,8 +4,8 @@
 
 | File | Lines | Size | Content |
 |------|-------|------|---------|
-| `KERNELFORGE_FINAL_PRD.md` | 1,452 | 80KB | Single source of truth — replaces all previous docs |
-| `GRPO_DEEP_DIVE.md` | 2,078 | 81KB | Algorithm math, memory budgets, stacked mitigations |
+| `KERNELFORGE_FINAL_PRD.md` | 1,457 | 80KB | Single source of truth — replaces all previous docs |
+| `GRPO_DEEP_DIVE.md` | 2,075 | 81KB | Algorithm math, memory budgets, stacked mitigations |
 
 ## PRD Section Map (`KERNELFORGE_FINAL_PRD.md`)
 
@@ -15,18 +15,18 @@
 | 1 | 27 | What We're Building |
 | 2 | 76 | Repository Structure |
 | 3 | 148 | Complete Task List (Phases 0-3) |
-| 4 | 1070 | Critical Path |
-| 5 | 1098 | All Links |
-| 6 | 1176 | Risk Matrix & Mitigations |
-| 6.0 | 1195 | Fundamental Research Risks |
-| 6.1 | 1344 | CUDA Agent Evaluation Pipeline Failures |
-| 6.2 | 1356 | doubleGraph Expert Baselines Failures |
-| 6.3 | 1368 | SkyDiscover Evolutionary Search Failures |
-| 6.4 | 1380 | GRPO Training Failures |
-| 6.5 | 1394 | Cross-Component Integration Risks |
-| 6.6 | 1405 | Decision Gates (Go/No-Go) |
-| 6.7 | 1420 | Realistic Timeline (with failure buffer) |
-| 6.8 | 1442 | Minimum Viable Submission |
+| 4 | 1075 | Critical Path |
+| 5 | 1103 | All Links |
+| 6 | 1181 | Risk Matrix & Mitigations |
+| 6.0 | 1200 | Fundamental Research Risks |
+| 6.1 | 1349 | CUDA Agent Evaluation Pipeline Failures |
+| 6.2 | 1361 | doubleGraph Expert Baselines Failures |
+| 6.3 | 1373 | SkyDiscover Evolutionary Search Failures |
+| 6.4 | 1385 | GRPO Training Failures |
+| 6.5 | 1399 | Cross-Component Integration Risks |
+| 6.6 | 1410 | Decision Gates (Go/No-Go) |
+| 6.7 | 1425 | Realistic Timeline (with failure buffer) |
+| 6.8 | 1447 | Minimum Viable Submission |
 
 ## GRPO Deep Dive Section Map (`GRPO_DEEP_DIVE.md`)
 
@@ -35,17 +35,17 @@
 | GRPO-1 | 335 | The Algorithm (Full Math) |
 | GRPO-2 | 495 | B200 192GB Memory Budget (Exact) |
 | GRPO-3 | 557 | TRL GRPOTrainer — Exact Configuration |
-| GRPO-4 | 1174 | MARS+TRLOO Credit Assignment (Multi-Turn) |
-| GRPO-5 | 1404 | Compute Budget on B200 |
-| GRPO-6 | 1449 | What To Monitor During Training |
-| GRPO-7 | 1507 | Critical Implementation Notes |
-| GRPO-8 | 1576 | Quick Reference Card |
-| GRPO-9 | 1626 | Nsight Compute Structured Rewards |
-| GRPO-10 | 1717 | Hybrid Eval (Local + Modal) |
-| GRPO-11 | 1765 | CPPO Completion Pruning |
-| GRPO-12 | 1808 | MASPO Soft Trust Region |
-| GRPO-13 | 1852 | Transformation Grammar (40 Rules) — DEFERRED TO v2 |
-| GRPO-14 | 1981 | Full Stacked Architecture (Single-GPU Hackathon) |
+| GRPO-4 | 1171 | MARS+TRLOO Credit Assignment (Multi-Turn) |
+| GRPO-5 | 1401 | Compute Budget on B200 |
+| GRPO-6 | 1446 | What To Monitor During Training |
+| GRPO-7 | 1504 | Critical Implementation Notes |
+| GRPO-8 | 1573 | Quick Reference Card |
+| GRPO-9 | 1623 | Nsight Compute Structured Rewards |
+| GRPO-10 | 1714 | Hybrid Eval (Local + Modal) |
+| GRPO-11 | 1762 | CPPO Completion Pruning |
+| GRPO-12 | 1805 | MASPO Soft Trust Region |
+| GRPO-13 | 1849 | Transformation Grammar (40 Rules) — DEFERRED TO v2 |
+| GRPO-14 | 1978 | Full Stacked Architecture (Single-GPU Hackathon) |
 
 ---
 
@@ -101,11 +101,11 @@ Dataset: `BytedTsinghua-SIA/CUDA-Agent-Ops-6K`. `load_cuda_agent_prompt_dataset(
 
 | Technique | Deep Dive Ref | File to Create |
 |-----------|---------------|----------------|
-| MARS+TRLOO credit assignment | GRPO-4 line 1174 | `training/custom_grpo_loop.py` |
-| Nsight structured rewards | GRPO-9 line 1626 | `training/hybrid_rollout.py` |
-| CPPO completion pruning | GRPO-11 line 1765 | (in custom_grpo_loop.py) |
-| MASPO soft trust region | GRPO-12 line 1808 | `training/maspo_loss.py` |
-| ~~Transformation grammar~~ | GRPO-13 line 1852 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
+| MARS+TRLOO credit assignment | GRPO-4 line 1171 | `training/custom_grpo_loop.py` |
+| Nsight structured rewards | GRPO-9 line 1623 | `training/hybrid_rollout.py` |
+| CPPO completion pruning | GRPO-11 line 1762 | (in custom_grpo_loop.py) |
+| MASPO soft trust region | GRPO-12 line 1805 | `training/maspo_loss.py` |
+| ~~Transformation grammar~~ | GRPO-13 line 1849 | DEFERRED to v2 — use CUDA-Agent SKILL.md + doubleGraph patterns instead |
 
 ### Abort Conditions
 
@@ -127,6 +127,8 @@ KernelForgeObservation(Observation): text, baseline_original_ms, baseline_double
 `reset(seed, episode_id) -> Observation` / `step(action, timeout_s) -> Observation` — dispatches to Modal evaluate_kernel (5 graphs, 50 warmup, 30 runs)
 
 ### Reward (`reward.py`)
+
+`validate_eval_result(result) -> dict` — asserts required Modal keys (compiles, correct, speedup_vs_orig, speedup_vs_dg, error), clamps NaN/inf, returns safe defaults on missing keys.
 
 `compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile, occupancy=None, mem_coalescing=None, warp_efficiency=None) -> float`
 
@@ -207,14 +209,14 @@ H1: multi-stage > base. H2: RFT necessary (skip → collapse). H3: SKILL.md > ge
 | `test_h100_features()` | 60s | GPU feature detection |
 | `evaluate_kernels_batch(payloads)` | 600s | Batch evaluation |
 
-### Hybrid Eval Strategy (GRPO-10 line 1717)
+### Hybrid Eval Strategy (GRPO-10 line 1714)
 
 Turn 1-2: local nvcc only. Turn 3: local + PAC verify. Turn 4+: Modal + ncu.
 
 ### NOT YET IMPLEMENTED
 
 - Nsight metrics integration into Modal eval endpoint (occupancy, coalescing, warp efficiency passed to continuous reward)
-- CPPO `cheap_cuda_score()` pre-filter (GRPO-11 line 1765): +1 for __global__, +1 __shared__, +1 threadIdx/blockIdx, +2 local nvcc compile; skip Modal if below threshold
+- CPPO `cheap_cuda_score()` pre-filter (GRPO-11 line 1762): +1 for __global__, +1 __shared__, +1 threadIdx/blockIdx, +2 local nvcc compile; skip Modal if below threshold
 
 ---
 

@@ -47,6 +47,8 @@ def step(self, action: KernelForgeAction, timeout_s=None, **kwargs) -> KernelFor
 ## Reward (`reward.py`)
 
 ```python
+def validate_eval_result(result: dict) -> dict  # Assert Modal keys, clamp NaN/inf, safe defaults
+
 def compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile,
                    occupancy=None, mem_coalescing=None, warp_efficiency=None) -> float
 ```
@@ -128,12 +130,12 @@ Entry type: `GPUCacheEntry(key: str, value: Any, metadata: dict)`
 
 Transformation grammar (12-40 rules) was planned but deferred. No production system has shipped this for CUDA kernels as of March 2026. For v1, use CUDA-Agent's SKILL.md verbatim + doubleGraph pattern paste.
 
-See GRPO-13, `GRPO_DEEP_DIVE.md` line 1852 for reference design.
+See GRPO-13, `GRPO_DEEP_DIVE.md` line 1849 for reference design.
 
 ## Deep Dive Pointers
 
-- Nsight rewards: `GRPO_DEEP_DIVE.md` line 1626 (GRPO-9)
-- Transform grammar (deferred): `GRPO_DEEP_DIVE.md` line 1852 (GRPO-13)
+- Nsight rewards: `GRPO_DEEP_DIVE.md` line 1623 (GRPO-9)
+- Transform grammar (deferred): `GRPO_DEEP_DIVE.md` line 1849 (GRPO-13)
 - Reward function spec: `GRPO_DEEP_DIVE.md` line 557 (GRPO-3, Sec 3.2)
 
 
