@@ -10,7 +10,7 @@
 
 | Param | Stage 1 (`stage1_warmup.py`) | Stage 2 (`stage2_rft.py`) | Stage 3 (`stage3_grpo.py`) |
 |-------|------------------------------|---------------------------|----------------------------|
-| **Type** | GRPO warm-up | RFT (SFT on filtered) | GRPO + curriculum |
+| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum (P3 demo) |
 | **LR** | 3e-6 | 5e-6 | 5e-6 |
 | **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
 | **G (generations)** | 4 | — | 2 |

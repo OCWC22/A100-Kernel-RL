@@ -112,7 +112,7 @@ Use `profile_baselines` + `evaluate_kernel` outputs as the source of truth for s
 - Baseline profiling: real compiled-kernel path first, measured CPU fallback second.
 - Speedups: computed only when baseline timings are available.
 - Target architecture: controlled by `KERNELFORGE_CUDA_ARCH` (`sm_80` for A100 by default).
-- Detailed readiness/tasks tracker: `A100_HACKATHON_STATUS.md`.
+- Detailed readiness/tasks tracker: see `docs/KERNELFORGE_FINAL_PRD.md` Section 3 (Complete Task List).
 
 ## 🧠 Training Pipeline
 

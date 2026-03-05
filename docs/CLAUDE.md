@@ -4,8 +4,8 @@
 
 | File | Lines | Size | Content |
 |------|-------|------|---------|
-| `KERNELFORGE_FINAL_PRD.md` | 1,336 | 68KB | Single source of truth — replaces all previous docs |
-| `GRPO_DEEP_DIVE.md` | 1,713 | 63KB | Algorithm math, memory budgets, stacked mitigations |
+| `KERNELFORGE_FINAL_PRD.md` | 1,382 | 73KB | Single source of truth — replaces all previous docs |
+| `GRPO_DEEP_DIVE.md` | 2,071 | 80KB | Algorithm math, memory budgets, stacked mitigations |
 
 ## PRD Section Map (`KERNELFORGE_FINAL_PRD.md`)
 
@@ -57,7 +57,7 @@
 
 | Param | Stage 1 (`stage1_warmup.py`) | Stage 2 (`stage2_rft.py`) | Stage 3 (`stage3_grpo.py`) |
 |-------|------------------------------|---------------------------|----------------------------|
-| **Type** | GRPO warm-up | RFT (SFT on filtered) | GRPO + curriculum |
+| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum (P3 demo) |
 | **LR** | 3e-6 | 5e-6 | 5e-6 |
 | **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
 | **G (generations)** | 4 | — | 2 |
