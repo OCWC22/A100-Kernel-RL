@@ -16,6 +16,11 @@ from openenv.core.env_server.types import Action, Observation, State
 from openenv_env.gpu_registry import get_gpu_spec
 from openenv_env.reward import compute_reward
 from openenv_env.skill_builder import build_skill_md
+from training.task_support import (
+    build_modal_payload,
+    normalize_eval_result,
+    normalize_task_row,
+)
 
 
 class KernelForgeAction(Action):
@@ -68,6 +73,14 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
         self.best_code = None
         self.original_baseline_ms = None
         self.doublegraph_baseline_ms = None
+        self.current_task = normalize_task_row(
+            {
+                "prompt": "Optimize a Weakly Connected Components CUDA kernel.",
+                "ops": ["weakly_connected_components"],
+                "data_source": "openenv_default",
+                "difficulty": 1,
+            }
+        )
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
     def reset(
@@ -82,14 +95,21 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
         self.best_reward = -1.0
         self.best_code = None
         self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
+        self.current_task = normalize_task_row(kwargs or self.current_task)
 
-        if self.original_baseline_ms is None:
+        if (
+            self.original_baseline_ms is None
+            and self.current_task.get("evaluation_backend") == "wcc"
+        ):
             baselines = self._modal("profile_baselines")
             self.original_baseline_ms = baselines["original_ms"]
             self.doublegraph_baseline_ms = baselines.get("doublegraph_ms")
 
         return KernelForgeObservation(
-            text=build_skill_md(self.target_gpu),
+            text=(
+                f"{build_skill_md(self.target_gpu)}\n\n---\n\n"
+                f"{self.current_task.get('prompt', '')}"
+            ),
             baseline_original_ms=self.original_baseline_ms,
             baseline_doublegraph_ms=self.doublegraph_baseline_ms,
             hardware=self.gpu_spec,
@@ -98,6 +118,8 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
             turn=self.turn,
             best_reward=self.best_reward,
             info={"phase": "reset"},
+            graph_properties=self.current_task.get("graph_properties"),
+            topology_type=self.current_task.get("topology"),
         )
 
     def step(
@@ -110,14 +132,24 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
         self.turn += 1
         self._state.step_count = self.turn
 
-        result = self._modal("evaluate_kernel", {
-            "cuda_code": action.cuda_code,
-            "verify_graphs": 5,
-            "warmup_iters": 50,
-            "benchmark_runs": 30,
-            "baseline_original_ms": self.original_baseline_ms,
-            "baseline_doublegraph_ms": self.doublegraph_baseline_ms,
-        })
+        try:
+            fn_name, payload = build_modal_payload(
+                action.cuda_code,
+                self.current_task,
+                baseline_orig_ms=self.original_baseline_ms,
+                baseline_dg_ms=self.doublegraph_baseline_ms,
+            )
+            result = normalize_eval_result(self._modal(fn_name, payload))
+        except Exception as exc:
+            result = {
+                "compiles": False,
+                "correct": False,
+                "runtime_ms": 0.0,
+                "runtime_stats": {},
+                "speedup_vs_orig": 0.0,
+                "speedup_vs_dg": 0.0,
+                "error": str(exc),
+            }
 
         # Compute speedups and reward via canonical function (P1-8)
         if not result.get("compiles"):
@@ -131,10 +163,17 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
             obs = (f"VERIFICATION FAILED (turn {self.turn}/{self.max_turns}):\n"
                    f"{result.get('verifier_msg', 'Unknown failure')}")
         else:
-            rt = result["runtime_ms"]
-            su_orig = self.original_baseline_ms / rt if rt > 0 else 0
-            su_dg = (self.doublegraph_baseline_ms / rt
-                     if self.doublegraph_baseline_ms and rt > 0 else 0)
+            rt = float(result["runtime_ms"])
+            su_orig = (
+                self.original_baseline_ms / rt
+                if self.original_baseline_ms and rt > 0
+                else float(result.get("speedup_vs_orig", 0.0) or 0.0)
+            )
+            su_dg = (
+                self.doublegraph_baseline_ms / rt
+                if self.doublegraph_baseline_ms and rt > 0
+                else float(result.get("speedup_vs_dg", 0.0) or 0.0)
+            )
 
             reward = compute_reward(
                 compiled=True,
@@ -154,7 +193,7 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
                 self.best_reward = reward
                 self.best_code = action.cuda_code
 
-        done = (self.turn >= self.max_turns) or (reward == 3.0)
+        done = (self.turn >= self.max_turns) or (reward >= 1.6)
 
         # Time-travel with experience (DoubleAI-inspired)
         # Each snapshot carries knowledge of what was tried and what failed
@@ -182,7 +221,10 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
                 "turn": self.turn,
                 "best_reward": self.best_reward,
                 "speedup": su_orig if result.get("correct") else 0,
+                "evaluation_backend": self.current_task.get("evaluation_backend"),
             },
+            graph_properties=self.current_task.get("graph_properties"),
+            topology_type=self.current_task.get("topology"),
         )
 
     @property

@@ -1,29 +1,36 @@
 """
-Multi-turn rollout for GRPOTrainer — the core agentic loop.
+Multi-turn rollout for GRPOTrainer.
 
-GPU split: B200 generates completions (vLLM colocate). Modal A100 evaluates
-correctness + speedup for reward. Performance reward MUST run on A100 — B200
-timing would optimize for sm_100, not the target sm_80.
-
-Implements TRL's rollout_func pattern (docs: https://huggingface.co/docs/trl/main/en/openenv)
-following the Wordle multi-turn example: loop over turns, call generate_rollout_completions()
-per turn, step environment, accumulate token IDs + logprobs across turns.
+The policy generates on the training GPU, while correctness and runtime reward
+are computed remotely on the target A100 Modal backend.
 """
+
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
 import tempfile
+from pathlib import Path
 from typing import Any, Callable
 
-from openenv_env.reward import compute_reward
 from training.curriculum import format_topology_context
+from training.task_support import (
+    build_generation_prompt,
+    build_prompt_lookup,
+    compute_task_reward,
+    evaluate_code_on_modal,
+    normalize_eval_result,
+    normalize_task_row,
+)
 
 MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
-MODAL_EVAL_FUNCTION = os.getenv("KERNELFORGE_MODAL_EVAL_FN", "evaluate_ops6k_kernel")
 LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_LOCAL_COMPILE", "1") == "1"
 TARGET_CUDA_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
+ROLLOUT_LOG_PATH = Path(
+    os.getenv("KERNELFORGE_ROLLOUT_LOG", "outputs/rollout_metrics.jsonl")
+).resolve()
 
 
 def extract_cuda_code(text: str) -> str:
@@ -35,20 +42,23 @@ def extract_cuda_code(text: str) -> str:
             if end != -1:
                 return text[start:end].strip()
 
-    if re.search(r"__global__\s+void\s+\w+", text):
+    if re.search(r"__global__\s+void\s+\w+", text) or "PYBIND11_MODULE" in text:
         return text.strip()
     return ""
 
 
+def _append_rollout_log(record: dict[str, Any]) -> None:
+    """Append one rollout event to a JSONL log file."""
+    try:
+        ROLLOUT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        with ROLLOUT_LOG_PATH.open("a", encoding="utf-8") as f:
+            f.write(json.dumps(record) + "\n")
+    except OSError:
+        pass
+
+
 def _local_compile_check(code: str) -> tuple[bool, str]:
-    """Quick local nvcc syntax check — fails non-compiling kernels before Modal.
-
-    Saves ~$0.001 per failed kernel by avoiding a Modal A100 call.
-    Only checks syntax (no linking, no GPU needed).
-
-    Returns:
-        (passes, error_message)
-    """
+    """Quick local nvcc syntax check before paying for a remote evaluation."""
     if not LOCAL_COMPILE_CHECK:
         return True, ""
 
@@ -60,13 +70,14 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
         obj_path = cu_path.replace(".cu", ".o")
         proc = subprocess.run(
             ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-c", cu_path, "-o", obj_path],
-            capture_output=True, text=True, timeout=15,
+            capture_output=True,
+            text=True,
+            timeout=15,
         )
 
-        # Cleanup
-        for p in (cu_path, obj_path):
+        for path in (cu_path, obj_path):
             try:
-                os.unlink(p)
+                os.unlink(path)
             except OSError:
                 pass
 
@@ -74,69 +85,21 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
             return False, proc.stderr[:1000]
         return True, ""
     except FileNotFoundError:
-        # nvcc not installed locally — skip check, let Modal handle it
         return True, ""
     except subprocess.TimeoutExpired:
         return False, "Local compile timed out (15s)"
-    except Exception as e:
-        # Don't block on unexpected errors — let Modal try
+    except Exception:
         return True, ""
-
-
-def _evaluate_on_modal(
-    code: str,
-    task_code: str = "",
-    baseline_orig_ms: float | None = None,
-    baseline_dg_ms: float | None = None,
-) -> dict:
-    """Send a single kernel to Modal for compile + verify + benchmark.
-
-    Uses evaluate_ops6k_kernel for generic PyTorch ops (with task_code),
-    or falls back to evaluate_kernel for WCC-specific evaluation.
-    """
-    import modal
-
-    if task_code:
-        eval_fn = modal.Function.from_name(MODAL_APP_NAME, MODAL_EVAL_FUNCTION)
-        return eval_fn.remote({
-            "cuda_code": code,
-            "task_code": task_code,
-            "warmup_iters": 10,
-            "benchmark_runs": 10,
-        })
-
-    # Fallback: WCC-specific evaluation (legacy path)
-    eval_fn = modal.Function.from_name(MODAL_APP_NAME, "evaluate_kernel")
-    return eval_fn.remote({
-        "cuda_code": code,
-        "verify_graphs": 5,
-        "warmup_iters": 50,
-        "benchmark_runs": 30,
-        "baseline_original_ms": baseline_orig_ms,
-        "baseline_doublegraph_ms": baseline_dg_ms,
-    })
 
 
 def _compute_reward_from_result(result: dict) -> float:
     """Compute continuous reward from evaluation result."""
-    return compute_reward(
-        compiled=result.get("compiles", False),
-        correct=result.get("correct", False),
-        speedup_vs_eager=result.get("speedup_vs_orig", 0),
-        speedup_vs_compile=result.get("speedup_vs_dg", 0),
-        occupancy=result.get("occupancy"),
-        mem_coalescing=result.get("mem_coalescing"),
-        warp_efficiency=result.get("warp_efficiency"),
-    )
+    return compute_task_reward(result)
 
 
 def _format_feedback(result: dict, reward: float, turn: int) -> str:
-    """Format evaluation feedback for the model's next turn.
-
-    Provides actionable information: exact error messages for compilation
-    failures, invariant violations for verification failures, and performance
-    metrics with optimization guidance for correct kernels.
-    """
+    """Format evaluator feedback for the next policy turn."""
+    result = normalize_eval_result(result)
     parts = [f"[Turn {turn + 1} Result]"]
 
     if not result.get("compiles"):
@@ -144,40 +107,39 @@ def _format_feedback(result: dict, reward: float, turn: int) -> str:
         parts.append(f"COMPILATION FAILED:\n{error[:800]}")
         parts.append("Fix the compilation errors above and resubmit.")
     elif not result.get("correct"):
-        msg = result.get("verifier_msg", "unknown verification failure")
+        msg = result.get("verifier_msg") or result.get("error") or "unknown verification failure"
         parts.append(f"VERIFICATION FAILED: {msg}")
-        parts.append("Your kernel produces incorrect output. Fix the algorithm.")
+        parts.append("Your kernel produced incorrect output. Fix the implementation.")
     else:
-        runtime = result.get("runtime_ms", 0)
-        speedup_eager = result.get("speedup_vs_orig", 0)
-        speedup_compile = result.get("speedup_vs_dg", 0)
-        stats = result.get("runtime_stats", {})
+        runtime = float(result.get("runtime_ms", 0.0) or 0.0)
+        speedup_eager = float(result.get("speedup_vs_orig", 0.0) or 0.0)
+        speedup_compile = float(result.get("speedup_vs_dg", 0.0) or 0.0)
+        stats = result.get("runtime_stats", {}) or {}
         parts.append(f"CORRECT. Runtime: {runtime:.3f}ms")
         parts.append(f"  Speedup vs eager: {speedup_eager:.2f}x")
         if speedup_compile:
             parts.append(f"  Speedup vs torch.compile: {speedup_compile:.2f}x")
         if stats:
             parts.append(
-                f"  Stats: mean={stats.get('mean', 0):.3f}ms, "
-                f"std={stats.get('std', 0):.3f}ms"
+                f"  Stats: mean={float(stats.get('mean', 0.0)):.3f}ms, "
+                f"std={float(stats.get('std', 0.0)):.3f}ms"
             )
 
-        if reward < 0.05:  # log(1.05) ~ 0.049, i.e. no meaningful speedup
+        if reward < 0.05:
             parts.append(
                 "Kernel is correct but not faster than eager PyTorch. "
-                "Try shared memory tiling, vectorized loads, or kernel fusion."
+                "Try reducing memory traffic or using shared memory tiling."
             )
-        elif reward < 0.69:  # log(2.0) ~ 0.693, i.e. modest speedup
+        elif reward < 0.69:
             parts.append(
-                "Modest speedup. Try to push past 2x. "
-                "Consider L2 cache pinning, warp-level primitives, or "
-                "register pressure tuning."
+                "Modest speedup. Push toward a 2x improvement with better occupancy, "
+                "vectorized loads, or warp-level primitives."
             )
 
     return "\n".join(parts)
 
 
-_baselines_cache: dict | None = None
+_baselines_cache: dict[str, Any] | None = None
 
 
 def _get_baselines() -> tuple[float | None, float | None]:
@@ -189,8 +151,8 @@ def _get_baselines() -> tuple[float | None, float | None]:
 
             fn = modal.Function.from_name(MODAL_APP_NAME, "profile_baselines")
             _baselines_cache = fn.remote() or {}
-        except Exception as e:
-            print(f"Baseline profiling failed: {e}")
+        except Exception as exc:
+            print(f"Baseline profiling failed: {exc}")
             _baselines_cache = {}
     return _baselines_cache.get("original_ms"), _baselines_cache.get("doublegraph_ms")
 
@@ -200,28 +162,14 @@ def make_multi_turn_rollout(
     skill_md_gpu: str | None = None,
     problem_metadata: list[dict] | None = None,
 ) -> Callable:
-    """Create a rollout_func for GRPOTrainer with multi-turn kernel refinement.
-
-    Following TRL's OpenEnv Wordle pattern:
-    - Loop over turns, calling generate_rollout_completions() per turn
-    - Step environment (Modal evaluation) with each completion
-    - Accumulate prompt_ids + completion_ids + logprobs across turns
-    - Return best_reward per episode via extra dict fields
-
-    Args:
-        max_turns: Maximum refinement turns per episode (3 for warm-up, 5 for main RL)
-        skill_md_gpu: GPU name for SKILL.md context (default: from env var)
-        problem_metadata: Optional list of problem dicts (from curriculum) with graph_properties.
-            When provided, topology context is included in prompts so the model learns
-            structure-aware optimization. Length must match prompts in rollout_func.
-    """
+    """Create a task-aware rollout_func for GRPOTrainer."""
     from trl.experimental.openenv import generate_rollout_completions
+    from openenv_env.skill_builder import build_skill_md
 
     gpu_name = skill_md_gpu or os.getenv("KERNELFORGE_TARGET_GPU", "a100").lower()
+    prompt_lookup = build_prompt_lookup(problem_metadata or [])
 
     def rollout_func(prompts: list[str], trainer: Any) -> dict:
-        from openenv_env.skill_builder import build_skill_md
-
         tokenizer = trainer.processing_class
         skill_context = build_skill_md(gpu_name)
         baseline_orig, baseline_dg = _get_baselines()
@@ -231,77 +179,87 @@ def make_multi_turn_rollout(
         all_logprobs: list[list[float]] = []
         all_best_rewards: list[float] = []
 
-        for prompt_idx, initial_prompt in enumerate(prompts):
+        for prompt_idx, prompt in enumerate(prompts):
+            task_row = normalize_task_row(prompt_lookup.get(prompt, {"prompt": prompt}))
+            topology_ctx = format_topology_context(task_row)
+            current_prompt = build_generation_prompt(
+                task_row,
+                skill_context=skill_context,
+                topology_context=topology_ctx,
+            )
+
             episode_prompt_ids: list[int] = []
             episode_completion_ids: list[int] = []
             episode_logprobs: list[float] = []
             best_reward = -1.0
 
-            # Build initial prompt with SKILL.md context + topology (if available)
-            topology_ctx = ""
-            if problem_metadata and prompt_idx < len(problem_metadata):
-                topology_ctx = format_topology_context(problem_metadata[prompt_idx])
-
-            current_prompt = (
-                f"{skill_context}\n\n"
-                f"---\n\n"
-                f"{initial_prompt}\n"
-                f"{topology_ctx}\n\n"
-                f"Write a complete CUDA kernel. Use ```cuda fenced code blocks."
-            )
-
             for turn in range(max_turns):
-                # Generate one completion via vLLM
                 outputs = generate_rollout_completions(trainer, [current_prompt])[0]
-
                 episode_prompt_ids.extend(outputs["prompt_ids"])
                 episode_completion_ids.extend(outputs["completion_ids"])
                 episode_logprobs.extend(outputs["logprobs"])
 
-                # Decode completion text
                 completion_text = outputs.get("text") or tokenizer.decode(
                     outputs["completion_ids"], skip_special_tokens=True
                 )
-
-                # Extract CUDA code
                 code = extract_cuda_code(completion_text)
                 if not code:
-                    feedback = (
-                        f"[Turn {turn + 1} Result]\n"
-                        f"No valid CUDA code found in your response. "
-                        f"Write a complete kernel with __global__ void function "
-                        f"inside ```cuda fenced code blocks."
-                    )
-                    current_prompt = f"{current_prompt}\n\n{completion_text}\n\n{feedback}"
-                    continue
-
-                # Local compile fast-path — fail non-compiling kernels before Modal
-                compiles_locally, compile_err = _local_compile_check(code)
-                if not compiles_locally:
                     reward = -1.0
-                    result = {"compiles": False, "error": compile_err[:200]}
+                    result = {
+                        "compiles": False,
+                        "correct": False,
+                        "error": (
+                            "No valid CUDA/C++ code was found. Return a fenced code block "
+                            "or a raw CUDA extension source file."
+                        ),
+                    }
                 else:
-                    # Evaluate on Modal (full compile + verify + benchmark)
-                    try:
-                        result = _evaluate_on_modal(code, baseline_orig, baseline_dg)
-                        reward = _compute_reward_from_result(result)
-                    except Exception as e:
-                        print(f"  [Turn {turn + 1}] Modal eval failed: {e}")
+                    compiles_locally, compile_err = _local_compile_check(code)
+                    if not compiles_locally:
                         reward = -1.0
-                        result = {"compiles": False, "error": str(e)[:200]}
+                        result = {"compiles": False, "correct": False, "error": compile_err[:200]}
+                    elif not task_row.get("supports_evaluation"):
+                        reward = -1.0
+                        result = {
+                            "compiles": False,
+                            "correct": False,
+                            "error": task_row.get("support_reason", "Unsupported evaluation backend"),
+                        }
+                    else:
+                        try:
+                            result = evaluate_code_on_modal(
+                                code,
+                                task_row,
+                                modal_app_name=MODAL_APP_NAME,
+                                baseline_orig_ms=baseline_orig,
+                                baseline_dg_ms=baseline_dg,
+                            )
+                            reward = float(result.get("reward", _compute_reward_from_result(result)))
+                        except Exception as exc:
+                            print(f"  [Turn {turn + 1}] Modal eval failed: {exc}")
+                            reward = -1.0
+                            result = {"compiles": False, "correct": False, "error": str(exc)[:200]}
 
                 if reward > best_reward:
                     best_reward = reward
 
-                # Early exit on perfect score
-                if reward >= 1.6:  # log(5.0) ~ 1.61, i.e. 5x+ speedup
+                _append_rollout_log(
+                    {
+                        "prompt_index": prompt_idx,
+                        "turn": turn + 1,
+                        "evaluation_backend": task_row.get("evaluation_backend"),
+                        "reward": reward,
+                        "compiles": bool(result.get("compiles")),
+                        "correct": bool(result.get("correct")),
+                        "runtime_ms": float(result.get("runtime_ms", 0.0) or 0.0),
+                        "speedup_vs_orig": float(result.get("speedup_vs_orig", 0.0) or 0.0),
+                        "speedup_vs_dg": float(result.get("speedup_vs_dg", 0.0) or 0.0),
+                    }
+                )
+
+                if reward >= 1.6 or turn == max_turns - 1:
                     break
 
-                # Last turn — no need for feedback
-                if turn == max_turns - 1:
-                    break
-
-                # Build feedback and extend prompt for next turn
                 feedback = _format_feedback(result, reward, turn)
                 current_prompt = f"{current_prompt}\n\n{completion_text}\n\n{feedback}"
 
@@ -313,7 +271,7 @@ def make_multi_turn_rollout(
             if (prompt_idx + 1) % 10 == 0 or prompt_idx == 0:
                 print(
                     f"  Rollout {prompt_idx + 1}/{len(prompts)}: "
-                    f"best_reward={best_reward:.1f}"
+                    f"best_reward={best_reward:.3f} backend={task_row.get('evaluation_backend')}"
                 )
 
         return {
@@ -327,12 +285,8 @@ def make_multi_turn_rollout(
 
 
 def reward_from_env(completions: list[str], **kwargs: Any) -> list[float]:
-    """Extract environment rewards passed via rollout_func kwargs.
-
-    This is the reward_funcs callback for GRPOTrainer. The actual reward
-    computation happens in the rollout loop; this just extracts the results.
-    """
+    """Extract the rewards produced by rollout_func."""
     env_rewards = kwargs.get("env_reward", [])
     if env_rewards:
-        return [float(r) for r in env_rewards]
+        return [float(reward) for reward in env_rewards]
     return [-1.0] * len(completions)

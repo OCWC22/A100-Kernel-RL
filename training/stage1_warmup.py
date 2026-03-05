@@ -15,18 +15,29 @@ See docs/TRAINING_PLAN.md for full rationale.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
-from datasets import Dataset
+if __package__ in {None, ""}:
+    ROOT = Path(__file__).resolve().parents[1]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
 from trl import GRPOConfig
 
 from training.custom_grpo_trainer import TRLOOGRPOTrainer
-from training.dataset_loader import load_training_dataset
+from training.dataset_loader import Dataset, load_training_dataset
 from training.model_loader import load_model_and_tokenizer
 from training.multi_turn_rollout import make_multi_turn_rollout, reward_from_env
+from training.task_support import normalize_task_row
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stage1")
+IS_LINUX = sys.platform.startswith("linux")
+USE_VLLM = os.getenv("KERNELFORGE_USE_VLLM", "1") == "1" and IS_LINUX
+OPTIMIZER = "paged_adamw_8bit" if IS_LINUX else "adamw_torch"
+USE_BF16 = IS_LINUX
 
 # Multi-turn configuration
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE1_MAX_TURNS", "3"))
@@ -51,16 +62,35 @@ def load_stage1_dataset() -> Dataset:
     except Exception as e:
         print(f"Could not load Ops-6K for Stage 1: {e}")
 
-    print("Using fallback Stage 1 prompts")
+    print("Using fallback Stage 1 prompts with live WCC evaluation support")
     return Dataset.from_list([
-        {"prompt": f"Write a CUDA vector addition kernel for {TARGET_GPU} ({TARGET_ARCH}). Take float* A, float* B, float* C, int N."},
-        {"prompt": f"Write a CUDA ReLU activation kernel for {TARGET_GPU} ({TARGET_ARCH}). Apply max(0, x) to a float array."},
-        {"prompt": f"Write a CUDA softmax kernel for {TARGET_GPU} ({TARGET_ARCH}). Compute row-wise softmax for a 2D matrix."},
-        {"prompt": f"Write a CUDA matrix multiplication kernel using shared memory tiling for {TARGET_GPU} ({TARGET_ARCH})."},
-        {"prompt": f"Write a CUDA GELU activation kernel for {TARGET_GPU} ({TARGET_ARCH})."},
-        {"prompt": f"Write a CUDA layer normalization kernel for {TARGET_GPU} ({TARGET_ARCH})."},
-        {"prompt": f"Write a CUDA batch normalization kernel for {TARGET_GPU} ({TARGET_ARCH})."},
-        {"prompt": f"Write a CUDA element-wise sigmoid kernel for {TARGET_GPU} ({TARGET_ARCH})."},
+        {
+            "prompt": (
+                f"Write a CUDA Weakly Connected Components kernel for {TARGET_GPU} ({TARGET_ARCH}) "
+                "using union-find with path compression."
+            ),
+            "ops": ["weakly_connected_components"],
+            "difficulty": 1,
+            "data_source": "fallback_wcc",
+        },
+        {
+            "prompt": (
+                f"Write a CUDA Weakly Connected Components kernel for {TARGET_GPU} ({TARGET_ARCH}) "
+                "optimized for sparse disconnected graphs with early convergence."
+            ),
+            "ops": ["weakly_connected_components"],
+            "difficulty": 1,
+            "data_source": "fallback_wcc",
+        },
+        {
+            "prompt": (
+                f"Write a CUDA Weakly Connected Components kernel for {TARGET_GPU} ({TARGET_ARCH}) "
+                "using shared memory staging for dense frontiers."
+            ),
+            "ops": ["weakly_connected_components"],
+            "difficulty": 2,
+            "data_source": "fallback_wcc",
+        },
     ])
 
 
@@ -74,31 +104,33 @@ def main():
 
     model, tokenizer = load_model_and_tokenizer()
     dataset = load_stage1_dataset()
+    task_rows = [normalize_task_row(row) for row in dataset.to_list()]
 
     rollout_func = make_multi_turn_rollout(
         max_turns=MAX_TURNS,
         skill_md_gpu=TARGET_GPU.lower(),
+        problem_metadata=task_rows,
     )
 
     config = GRPOConfig(
         learning_rate=3e-6,
         temperature=0.9,         # High exploration
         num_generations=4,
-        max_prompt_length=512,
+        max_prompt_length=4096,
         max_completion_length=4096,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         max_steps=MAX_STEPS,
-        optim="paged_adamw_8bit",
-        bf16=True,
+        optim=OPTIMIZER,
+        bf16=USE_BF16,
         report_to="none",
         output_dir=OUTPUT_DIR,
         logging_steps=1,
         top_k=50,
         top_p=0.95,
         repetition_penalty=1.05,
-        use_vllm=True,
-        vllm_mode="colocate",
+        use_vllm=USE_VLLM,
+        vllm_mode="colocate" if USE_VLLM else "server",
     )
 
     trainer = TRLOOGRPOTrainer(

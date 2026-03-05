@@ -29,10 +29,32 @@ from build_combined_dataset import (  # noqa: E402
     DEFAULT_DG_MANIFEST,
     build_combined_dataset,
     inject_into_curriculum,
+    write_jsonl,
 )
+from training.task_support import filter_supported_tasks, normalize_task_row, summarize_tasks
 
 DEFAULT_COMBINED_PATH = ROOT / "datasets" / "combined_kernelforge.jsonl"
 DEFAULT_DG_SFT_PATH = ROOT / "datasets" / "doublegraph_sft.jsonl"
+
+
+class MiniDataset(list):
+    """Very small Dataset-compatible fallback for preflight and local smoke checks."""
+
+    @property
+    def column_names(self) -> list[str]:
+        if not self:
+            return []
+        return sorted({key for row in self for key in row.keys()})
+
+    def shuffle(self, seed: int = 42):
+        import random
+
+        rows = list(self)
+        random.Random(seed).shuffle(rows)
+        return MiniDataset(rows)
+
+    def to_list(self) -> list[dict[str, Any]]:
+        return list(self)
 
 
 def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
@@ -46,9 +68,40 @@ def _read_jsonl(path: str | Path) -> list[dict[str, Any]]:
 
 
 def _to_prompt_dataset(rows: list[dict[str, Any]]) -> Dataset:
+    normalized = [normalize_task_row(r) for r in rows if r.get("prompt")]
     if _hf_datasets is None:
-        raise RuntimeError("Hugging Face 'datasets' package is required for stage1 prompt Dataset")
-    return Dataset.from_list([{"prompt": str(r.get("prompt", ""))} for r in rows if r.get("prompt")])
+        return MiniDataset(normalized)
+    return Dataset.from_list(normalized)
+
+
+def _load_or_build_combined_rows(
+    dg_manifest: str,
+    ops6k_max: int | None,
+    seed: int,
+    combined_output: str,
+) -> list[dict[str, Any]]:
+    combined_path = Path(combined_output)
+    rows: list[dict[str, Any]]
+
+    if combined_path.exists():
+        rows = _read_jsonl(combined_path)
+    else:
+        rows = []
+
+    needs_regen = not rows
+    if rows and ops6k_max is not None and int(ops6k_max) > 0:
+        has_ops_tasks = any(str(row.get("task_code") or "").strip() for row in rows)
+        needs_regen = needs_regen or not has_ops_tasks
+
+    if needs_regen:
+        rows = build_combined_dataset(
+            dg_path=dg_manifest,
+            ops6k_max=ops6k_max,
+            seed=seed,
+        )
+        write_jsonl(rows, combined_path)
+
+    return rows
 
 
 def load_training_dataset(
@@ -80,25 +133,36 @@ def load_training_dataset(
             return []
         return _read_jsonl(sft_file)
 
-    combined_path = Path(combined_output)
-    if combined_path.exists():
-        rows = _read_jsonl(combined_path)
-    else:
-        rows = build_combined_dataset(
-            dg_path=dg_manifest,
-            ops6k_max=ops6k_max,
-            seed=seed,
-        )
+    rows = _load_or_build_combined_rows(
+        dg_manifest=dg_manifest,
+        ops6k_max=ops6k_max,
+        seed=seed,
+        combined_output=combined_output,
+    )
+    supported_rows = filter_supported_tasks(rows)
 
     if stage_key == "stage1":
         stage1_rows = [
             row
-            for row in rows
+            for row in supported_rows
             if int(row.get("difficulty", 1)) == 1
             or (row.get("data_source") == "doublegraph_a100" and int(row.get("difficulty", 1)) == 2)
         ]
+        if len(stage1_rows) < 16:
+            stage1_rows = list(supported_rows)
+        if not stage1_rows:
+            raise RuntimeError(
+                "No Stage 1 rows have a live evaluator. "
+                f"Dataset summary: {summarize_tasks(rows)}"
+            )
         return _to_prompt_dataset(stage1_rows)
 
     if curriculum_manager is not None:
-        inject_into_curriculum(curriculum_manager, rows)
-    return rows
+        inject_into_curriculum(curriculum_manager, supported_rows)
+
+    if not supported_rows:
+        raise RuntimeError(
+            "No live-evaluable tasks are available for GRPO. "
+            f"Dataset summary: {summarize_tasks(rows)}"
+        )
+    return supported_rows

@@ -26,14 +26,15 @@ def check_reward_distribution(rewards: list[float]) -> dict:
     counts = Counter(rewards)
     total = len(rewards)
     flags = []
+    max_reward = max(rewards)
 
-    # Flag: >90% of rewards are maximum (3.0) — likely hacking
-    if counts.get(3.0, 0) / total > 0.90:
-        flags.append("SUSPICIOUS: >90% max reward (3.0) — likely reward hacking")
+    # Flag: >90% of rewards cluster at the observed maximum — likely hacking
+    if counts.get(max_reward, 0) / total > 0.90:
+        flags.append("SUSPICIOUS: >90% of rewards are at the observed maximum")
 
-    # Flag: bimodal distribution (-1 and +3 only) — overfitting
-    if len(counts) <= 2 and -1.0 in counts and 3.0 in counts:
-        flags.append("WARNING: bimodal distribution (-1, +3 only) — model may be overfitting")
+    # Flag: rewards collapse into failure/max modes only
+    if len(counts) <= 2 and min(rewards) <= -0.9 and max_reward >= 1.5:
+        flags.append("WARNING: bimodal distribution (failure vs high reward only)")
 
     # Flag: all rewards identical — model collapsed
     if len(counts) == 1:
@@ -43,9 +44,9 @@ def check_reward_distribution(rewards: list[float]) -> dict:
     if all(r <= 0 for r in rewards):
         flags.append("WARNING: no positive rewards — model cannot generate correct kernels")
 
-    # Flag: never achieves reward >1 (no speedup over baseline)
-    if max(rewards) <= 1.0 and len(rewards) > 20:
-        flags.append("INFO: no speedup rewards achieved — consider easier problems")
+    # Flag: never achieves a meaningful speedup
+    if max_reward <= 0.2 and len(rewards) > 20:
+        flags.append("INFO: no meaningful speedup rewards achieved — consider easier problems")
 
     return {
         "distribution": dict(sorted(counts.items())),
@@ -55,9 +56,9 @@ def check_reward_distribution(rewards: list[float]) -> dict:
         "entropy": _entropy(list(counts.values())),
         "tier_rates": {
             "fail_rate": sum(1 for r in rewards if r < 0) / total,
-            "correct_rate": sum(1 for r in rewards if r >= 1.0) / total,
-            "speedup_rate": sum(1 for r in rewards if r >= 2.0) / total,
-            "top_rate": sum(1 for r in rewards if r >= 3.0) / total,
+            "correct_rate": sum(1 for r in rewards if r >= 0.0) / total,
+            "speedup_rate": sum(1 for r in rewards if r >= math.log(1.25)) / total,
+            "top_rate": sum(1 for r in rewards if r >= math.log(2.0)) / total,
         },
     }
 

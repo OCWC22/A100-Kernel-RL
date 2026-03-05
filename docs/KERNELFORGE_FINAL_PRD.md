@@ -5,6 +5,18 @@
 **Primary Model:** Qwen3-Coder-Next (80B MoE, 3B active, agentic RL-trained)
 **Last Updated:** March 5, 2026
 
+## RL Feasibility
+
+Single-B200 RL is plausible only for policy optimization, not for the full CUDA-Agent replication target yet. The bottleneck is rollout evaluation throughput. TRL's OpenEnv path supports custom rollout hooks and colocated generation on one GPU, but reward still depends on remote compile and benchmark loops on A100 hardware, which is where latency accumulates. With the current configs, Stage 1 worst-case is about `300 steps * 4 generations * 3 turns = 3600` evaluator calls, and Stage 3 worst-case is about `150 steps * 2 generations * 5 turns = 1500` more. Even at a modest 5 to 20 seconds per remote evaluation, that is already roughly 7 to 28 A100-GPU-hours just for reward collection, before task coverage scales up.
+
+The bigger research problem is task coverage. CUDA Agent reports 6K synthesized tasks and 98.8% pass rate / 2.11x speedup versus `torch.compile` on KernelBench overall, with long-horizon RL over up to 150 turns. The current patched repo has only 19 evaluator-backed tasks. That is enough to start training the infrastructure, but not enough to claim CUDA-Agent-like generalization or KernelBench reproduction. The current approach will overfit the supported subset unless it adds:
+
+- Real correctness and runtime harnesses for the non-WCC doubleGraph algorithms
+- Support for stateful Ops tasks beyond the stateless subset
+- Higher-throughput async or batched evaluator workers so rollout latency does not dominate learning
+
+Primary sources used for this feasibility judgment: CUDA Agent project, CUDA-Agent-Ops-6K, TRL OpenEnv docs, OpenEnv, Qwen3-Coder-Next FP8 Dynamic, and KernelBench.
+
 ---
 
 ## 0. Locked Decisions

@@ -2,6 +2,7 @@
 Modal serverless functions for CUDA kernel evaluation.
 All GPU work runs here: compilation, verification, benchmarking, and baselines.
 """
+import hashlib
 import modal
 import subprocess
 import tempfile
@@ -9,6 +10,8 @@ import os
 import ctypes
 import numpy as np
 from typing import Any
+
+from openenv_env.anti_hack import extract_cu_flags, scan_forbidden_symbols
 
 # CUDA 12.4 Docker image with Ampere/Hopper support
 cuda_image = (
@@ -73,6 +76,126 @@ def _load_kernel_source(kernel_name: str) -> str:
         return f.read()
 
 
+def _nvcc_command(
+    src_path: str,
+    output_path: str,
+    cuda_code: str,
+    shared: bool = True,
+) -> list[str]:
+    """Build a safe nvcc command with whitelisted user flags."""
+    extra_flags = extract_cu_flags(cuda_code)
+    cmd = ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-O3", src_path, "-o", output_path]
+    if shared:
+        cmd.extend(["--shared", "-Xcompiler", "-fPIC"])
+    cmd.extend(extra_flags or ["--use_fast_math"])
+    return cmd
+
+
+def _ops_task_has_empty_init_inputs(task_code: str) -> bool:
+    """Best-effort stateless-task detection for the local Ops harness."""
+    import ast
+
+    try:
+        tree = ast.parse(task_code)
+    except SyntaxError:
+        return False
+
+    for node in tree.body:
+        if not isinstance(node, ast.FunctionDef) or node.name != "get_init_inputs":
+            continue
+        returns = [sub.value for sub in ast.walk(node) if isinstance(sub, ast.Return)]
+        if not returns:
+            return True
+        value = returns[-1]
+        if isinstance(value, (ast.List, ast.Tuple)) and len(value.elts) == 0:
+            return True
+        if isinstance(value, ast.Constant) and value.value is None:
+            return True
+        return False
+
+    return True
+
+
+def _ops_task_supported(task_code: str) -> bool:
+    """Return True when the task can be executed by the current extension harness."""
+    deny_tokens = (
+        "nn.Conv",
+        "nn.Linear",
+        "nn.BatchNorm",
+        "nn.LSTM",
+        "nn.GRU",
+        "nn.Embedding",
+        "nn.Parameter",
+        "nn.MultiheadAttention",
+        "register_buffer(",
+        "register_parameter(",
+    )
+    return _ops_task_has_empty_init_inputs(task_code) and not any(
+        token in task_code for token in deny_tokens
+    )
+
+
+def _move_to_cuda(value, torch):
+    """Recursively move nested tensors to CUDA."""
+    if isinstance(value, torch.Tensor):
+        return value.cuda()
+    if isinstance(value, list):
+        return [_move_to_cuda(item, torch) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_move_to_cuda(item, torch) for item in value)
+    if isinstance(value, dict):
+        return {key: _move_to_cuda(item, torch) for key, item in value.items()}
+    return value
+
+
+def _clone_value(value):
+    """Recursively clone nested tensor structures."""
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return value.detach().clone()
+    if isinstance(value, list):
+        return [_clone_value(item) for item in value]
+    if isinstance(value, tuple):
+        return tuple(_clone_value(item) for item in value)
+    if isinstance(value, dict):
+        return {key: _clone_value(item) for key, item in value.items()}
+    return value
+
+
+def _assert_close(candidate, reference, torch) -> None:
+    """Recursively compare nested outputs."""
+    if isinstance(reference, torch.Tensor):
+        torch.testing.assert_close(candidate, reference, rtol=1e-3, atol=1e-3)
+        return
+    if isinstance(reference, tuple):
+        if not isinstance(candidate, tuple) or len(candidate) != len(reference):
+            raise AssertionError("Tuple output shape mismatch")
+        for cand_item, ref_item in zip(candidate, reference):
+            _assert_close(cand_item, ref_item, torch)
+        return
+    if isinstance(reference, list):
+        if not isinstance(candidate, list) or len(candidate) != len(reference):
+            raise AssertionError("List output shape mismatch")
+        for cand_item, ref_item in zip(candidate, reference):
+            _assert_close(cand_item, ref_item, torch)
+        return
+    if isinstance(reference, dict):
+        if not isinstance(candidate, dict) or set(candidate) != set(reference):
+            raise AssertionError("Dict output keys mismatch")
+        for key in reference:
+            _assert_close(candidate[key], reference[key], torch)
+        return
+    if candidate != reference:
+        raise AssertionError(f"Scalar mismatch: {candidate!r} != {reference!r}")
+
+
+def _module_name(prefix: str, payload: str) -> str:
+    """Create a deterministic, collision-resistant extension module name."""
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()[:10]
+    return f"{prefix}_{digest}"
+
+
 def _benchmark_kernel_source(
     cuda_code: str,
     warmup_iters: int = 40,
@@ -88,18 +211,7 @@ def _benchmark_kernel_source(
             f.write(cuda_code)
 
         proc = subprocess.run(
-            [
-                "nvcc",
-                f"-arch={TARGET_CUDA_ARCH}",
-                "-O3",
-                "-use_fast_math",
-                src_path,
-                "-o",
-                lib_path,
-                "--shared",
-                "-Xcompiler",
-                "-fPIC",
-            ],
+            _nvcc_command(src_path, lib_path, cuda_code),
             capture_output=True,
             text=True,
             timeout=30,
@@ -196,8 +308,7 @@ def evaluate_kernel(payload: dict) -> dict:
         # Step 1: Compile for target architecture
         try:
             proc = subprocess.run(
-                ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-O3", "-use_fast_math",
-                 src_path, "-o", lib_path, "--shared", "-Xcompiler", "-fPIC"],
+                _nvcc_command(src_path, lib_path, cuda_code),
                 capture_output=True, text=True, timeout=30,
             )
             if proc.returncode != 0:
@@ -205,6 +316,11 @@ def evaluate_kernel(payload: dict) -> dict:
                 return result
         except subprocess.TimeoutExpired:
             result["error"] = "Compilation timed out (30s limit)"
+            return result
+
+        forbidden_reason = scan_forbidden_symbols(lib_path)
+        if forbidden_reason:
+            result["error"] = forbidden_reason
             return result
 
         result["compiles"] = True
@@ -281,9 +397,10 @@ def evaluate_kernel(payload: dict) -> dict:
         # Step 4: Lightweight profiling (occupancy + register info from ptxas)
         # No ncu required — uses ptxas verbose output and cuOccupancy API
         try:
+            ptxas_cmd = ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-O3", "--ptxas-options=-v", "-c", src_path, "-o", "/dev/null"]
+            ptxas_cmd.extend(extract_cu_flags(cuda_code) or ["--use_fast_math"])
             ptxas_proc = subprocess.run(
-                ["nvcc", f"-arch={TARGET_CUDA_ARCH}", "-O3", "-use_fast_math",
-                 "--ptxas-options=-v", "-c", src_path, "-o", "/dev/null"],
+                ptxas_cmd,
                 capture_output=True, text=True, timeout=15,
             )
             ptxas_out = ptxas_proc.stderr
@@ -470,7 +587,10 @@ def evaluate_kernels_batch(payloads: list[dict]) -> list[dict]:
     results = []
     for payload in payloads:
         try:
-            result = evaluate_kernel.local(payload)
+            if payload.get("evaluation_backend") == "ops6k" or payload.get("task_code"):
+                result = evaluate_ops6k_kernel.local(payload)
+            else:
+                result = evaluate_kernel.local(payload)
             results.append(result)
         except Exception as e:
             results.append({
@@ -511,129 +631,133 @@ def evaluate_ops6k_kernel(payload: dict) -> dict:
         speedup_vs_dg: float       - vs torch.compile
         error: str
     """
-    import torch
     import importlib.util
     import sys
+    import torch
 
     cuda_code = payload.get("cuda_code", "")
     task_code = payload.get("task_code", "")
-    warmup_iters = payload.get("warmup_iters", 10)
-    benchmark_runs = payload.get("benchmark_runs", 10)
+    warmup_iters = int(payload.get("warmup_iters", 10))
+    benchmark_runs = int(payload.get("benchmark_runs", 10))
 
     result = {
-        "compiles": False, "correct": False,
-        "runtime_ms": 0.0, "runtime_stats": {},
-        "baseline_eager_ms": 0.0, "baseline_compile_ms": 0.0,
-        "speedup_vs_orig": 0.0, "speedup_vs_dg": 0.0, "error": "",
+        "compiles": False,
+        "correct": False,
+        "runtime_ms": 0.0,
+        "runtime_stats": {},
+        "baseline_eager_ms": 0.0,
+        "baseline_compile_ms": 0.0,
+        "speedup_vs_orig": 0.0,
+        "speedup_vs_dg": 0.0,
+        "verifier_msg": "",
+        "error": "",
     }
 
     if not cuda_code or not task_code:
         result["error"] = "Missing cuda_code or task_code"
         return result
+    if not _ops_task_supported(task_code):
+        result["error"] = (
+            "Unsupported Ops task for live evaluation: only stateless tasks with empty "
+            "get_init_inputs() are executable with the current extension harness."
+        )
+        return result
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        # Write the reference model as model.py
         model_path = os.path.join(tmpdir, "model.py")
-        with open(model_path, "w") as f:
+        with open(model_path, "w", encoding="utf-8") as f:
             f.write(task_code)
 
-        # Write the CUDA kernel
-        kernel_path = os.path.join(tmpdir, "kernels", "kernel.cu")
-        os.makedirs(os.path.join(tmpdir, "kernels"), exist_ok=True)
-        with open(kernel_path, "w") as f:
+        kernel_path = os.path.join(tmpdir, "kernel.cu")
+        with open(kernel_path, "w", encoding="utf-8") as f:
             f.write(cuda_code)
 
-        # Write a minimal binding file
-        binding_path = os.path.join(tmpdir, "kernels", "kernel_binding.cpp")
-        with open(binding_path, "w") as f:
-            f.write(_generate_binding_cpp(cuda_code))
-
-        # Step 1: Compile with torch.utils.cpp_extension
         try:
             sys.path.insert(0, tmpdir)
             import torch.utils.cpp_extension as cpp_ext
 
-            sources = [kernel_path]
-            if os.path.exists(binding_path):
-                sources.append(binding_path)
-
             build_dir = os.path.join(tmpdir, "build")
             os.makedirs(build_dir, exist_ok=True)
 
-            cpp_ext.load(
-                name="cuda_kernel",
-                sources=sources,
+            module_name = _module_name("ops_kernel", cuda_code)
+            extra_cuda_cflags = ["-O3", f"-arch={TARGET_CUDA_ARCH}"]
+            extra_cuda_cflags.extend(extract_cu_flags(cuda_code) or ["--use_fast_math"])
+            extension = cpp_ext.load(
+                name=module_name,
+                sources=[kernel_path],
                 build_directory=build_dir,
                 verbose=False,
                 with_cuda=True,
                 extra_cflags=["-O3", "-std=c++17"],
-                extra_cuda_cflags=[
-                    "-O3", "--use_fast_math", f"-arch={TARGET_CUDA_ARCH}",
-                ],
+                extra_cuda_cflags=list(dict.fromkeys(extra_cuda_cflags)),
             )
+            if not hasattr(extension, "run_kernel"):
+                result["error"] = (
+                    "Compiled extension does not expose run_kernel. "
+                    "Return a PYBIND11_MODULE with m.def(\"run_kernel\", &run_kernel)."
+                )
+                return result
             result["compiles"] = True
-        except Exception as e:
-            result["error"] = f"Compilation failed: {str(e)[:1500]}"
+        except Exception as exc:
+            result["error"] = f"Compilation failed: {str(exc)[:1500]}"
             return result
+        finally:
+            try:
+                sys.path.remove(tmpdir)
+            except ValueError:
+                pass
 
-        # Step 2: Load reference model
         try:
+            torch.manual_seed(42)
             spec = importlib.util.spec_from_file_location("ref_model", model_path)
             ref_mod = importlib.util.module_from_spec(spec)
+            assert spec.loader is not None
             spec.loader.exec_module(ref_mod)
 
             init_inputs = ref_mod.get_init_inputs()
+            if init_inputs is None:
+                init_inputs = []
             if not isinstance(init_inputs, (list, tuple)):
                 init_inputs = [init_inputs]
 
             ref_model = ref_mod.Model(*init_inputs).eval().cuda()
-        except Exception as e:
-            result["error"] = f"Reference model load failed: {str(e)[:500]}"
+        except Exception as exc:
+            result["error"] = f"Reference model load failed: {str(exc)[:500]}"
             return result
 
-        # Step 3: Correctness check (5 random seeds)
         try:
-            def _transform_tensors(tensors, fn):
-                if isinstance(tensors, torch.Tensor):
-                    return fn(tensors)
-                if isinstance(tensors, (list, tuple)):
-                    return [_transform_tensors(x, fn) for x in tensors]
-                if isinstance(tensors, dict):
-                    return {k: _transform_tensors(v, fn) for k, v in tensors.items()}
-                return tensors
-
             for seed in range(5):
                 torch.manual_seed(42 + seed)
                 test_inputs = ref_mod.get_inputs()
                 if not isinstance(test_inputs, (list, tuple)):
                     test_inputs = [test_inputs]
-                test_inputs = _transform_tensors(test_inputs, lambda x: x.cuda())
+                test_inputs = _move_to_cuda(test_inputs, torch)
+                ref_inputs = _clone_value(test_inputs)
+                candidate_inputs = _clone_value(test_inputs)
 
                 with torch.no_grad():
-                    ref_model(*test_inputs)
+                    ref_output = ref_model(*ref_inputs)
+                    candidate_output = extension.run_kernel(*candidate_inputs)
 
-                # Correctness = reference model runs without error on these inputs.
-                # Full output comparison requires ModelNew with kernel binding —
-                # wired when kernel binding format is standardized.
+                _assert_close(candidate_output, ref_output, torch)
 
             result["correct"] = True
-        except Exception as e:
-            result["correct"] = False
-            result["error"] = f"Correctness check failed: {str(e)[:500]}"
+            result["verifier_msg"] = "Outputs matched reference for 5 random seeds"
+        except Exception as exc:
+            result["error"] = f"Correctness check failed: {str(exc)[:800]}"
+            result["verifier_msg"] = result["error"]
             return result
 
-        # Step 4: Profile baselines (eager + torch.compile)
         try:
             torch.manual_seed(42)
             bench_inputs = ref_mod.get_inputs()
             if not isinstance(bench_inputs, (list, tuple)):
                 bench_inputs = [bench_inputs]
-            bench_inputs = _transform_tensors(bench_inputs, lambda x: x.cuda())
+            bench_inputs = _move_to_cuda(bench_inputs, torch)
 
-            # Eager baseline
             for _ in range(warmup_iters):
                 with torch.no_grad():
-                    ref_model(*bench_inputs)
+                    ref_model(*_clone_value(bench_inputs))
             torch.cuda.synchronize()
 
             eager_times = []
@@ -642,7 +766,7 @@ def evaluate_ops6k_kernel(payload: dict) -> dict:
                 end_evt = torch.cuda.Event(enable_timing=True)
                 start_evt.record()
                 with torch.no_grad():
-                    ref_model(*bench_inputs)
+                    ref_model(*_clone_value(bench_inputs))
                 end_evt.record()
                 end_evt.synchronize()
                 eager_times.append(start_evt.elapsed_time(end_evt))
@@ -650,44 +774,63 @@ def evaluate_ops6k_kernel(payload: dict) -> dict:
             eager_ms = float(np.median(eager_times))
             result["baseline_eager_ms"] = eager_ms
 
-            # torch.compile baseline
-            compiled_model = torch.compile(ref_model)
+            compile_ms = 0.0
+            try:
+                compiled_model = torch.compile(ref_model)
+                for _ in range(warmup_iters):
+                    with torch.no_grad():
+                        compiled_model(*_clone_value(bench_inputs))
+                torch.cuda.synchronize()
+
+                compile_times = []
+                for _ in range(benchmark_runs):
+                    start_evt = torch.cuda.Event(enable_timing=True)
+                    end_evt = torch.cuda.Event(enable_timing=True)
+                    start_evt.record()
+                    with torch.no_grad():
+                        compiled_model(*_clone_value(bench_inputs))
+                    end_evt.record()
+                    end_evt.synchronize()
+                    compile_times.append(start_evt.elapsed_time(end_evt))
+
+                compile_ms = float(np.median(compile_times))
+            except Exception:
+                compile_ms = 0.0
+            result["baseline_compile_ms"] = compile_ms
+
             for _ in range(warmup_iters):
-                with torch.no_grad():
-                    compiled_model(*bench_inputs)
+                extension.run_kernel(*_clone_value(bench_inputs))
             torch.cuda.synchronize()
 
-            compile_times = []
+            kernel_times = []
             for _ in range(benchmark_runs):
                 start_evt = torch.cuda.Event(enable_timing=True)
                 end_evt = torch.cuda.Event(enable_timing=True)
                 start_evt.record()
-                with torch.no_grad():
-                    compiled_model(*bench_inputs)
+                extension.run_kernel(*_clone_value(bench_inputs))
                 end_evt.record()
                 end_evt.synchronize()
-                compile_times.append(start_evt.elapsed_time(end_evt))
+                kernel_times.append(start_evt.elapsed_time(end_evt))
 
-            compile_ms = float(np.median(compile_times))
-            result["baseline_compile_ms"] = compile_ms
-
-            # For now, kernel_ms = compile_ms (placeholder until ModelNew wiring)
-            # The speedup will be 1.0 — real speedup requires loading the kernel
-            kernel_ms = compile_ms
+            kernel_times_np = np.array(kernel_times)
+            kernel_ms = float(np.median(kernel_times_np))
             result["runtime_ms"] = kernel_ms
             result["runtime_stats"] = {
+                "mean": float(np.mean(kernel_times_np)),
+                "median": float(np.median(kernel_times_np)),
+                "std": float(np.std(kernel_times_np)),
+                "min": float(np.min(kernel_times_np)),
+                "max": float(np.max(kernel_times_np)),
                 "eager_ms": eager_ms,
                 "compile_ms": compile_ms,
-                "kernel_ms": kernel_ms,
             }
 
             if eager_ms > 0 and kernel_ms > 0:
                 result["speedup_vs_orig"] = eager_ms / kernel_ms
             if compile_ms > 0 and kernel_ms > 0:
                 result["speedup_vs_dg"] = compile_ms / kernel_ms
-
-        except Exception as e:
-            result["error"] = f"Profiling failed: {str(e)[:500]}"
+        except Exception as exc:
+            result["error"] = f"Profiling failed: {str(exc)[:500]}"
 
     return result
 

@@ -13,6 +13,7 @@ LoRA targets differ by architecture:
 from __future__ import annotations
 
 import os
+import sys
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
@@ -21,6 +22,7 @@ TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 PRIMARY_MODEL = os.getenv("KERNELFORGE_MODEL", "Qwen/Qwen3-Coder-Next")
 # Fallback model (dense)
 FALLBACK_MODEL = os.getenv("KERNELFORGE_FALLBACK_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
+DEV_MODEL = os.getenv("KERNELFORGE_DEV_MODEL", "Qwen/Qwen2.5-Coder-0.5B-Instruct")
 
 # LoRA constants
 LORA_R = 16
@@ -43,6 +45,7 @@ MAX_SEQ_LENGTH = 8192
 _model = None
 _tokenizer = None
 _model_type = None  # "moe" or "dense"
+_model_key = None
 
 
 def load_model_and_tokenizer(
@@ -58,18 +61,27 @@ def load_model_and_tokenizer(
     Returns:
         (model, tokenizer) tuple ready for training.
     """
-    global _model, _tokenizer, _model_type
-    if _model is not None:
+    global _model, _tokenizer, _model_type, _model_key
+
+    resolved_checkpoint = checkpoint_path if checkpoint_path and os.path.exists(checkpoint_path) else None
+    cache_key = resolved_checkpoint or ("fallback" if force_fallback else "primary")
+    if _model is not None and _model_key == cache_key:
         return _model, _tokenizer
 
-    if checkpoint_path:
-        _model, _tokenizer = _load_from_checkpoint(checkpoint_path)
+    if resolved_checkpoint:
+        _model, _tokenizer = _load_from_checkpoint(resolved_checkpoint)
+        _model_key = cache_key
         return _model, _tokenizer
 
     if not force_fallback:
         try:
-            _model, _tokenizer = _load_primary()
-            _model_type = "moe"
+            if sys.platform != "linux":
+                _model, _tokenizer = _load_portable_dev_model()
+                _model_type = "portable"
+            else:
+                _model, _tokenizer = _load_primary()
+                _model_type = "moe"
+            _model_key = cache_key
             return _model, _tokenizer
         except Exception as e:
             print(f"Primary model ({PRIMARY_MODEL}) failed: {e}")
@@ -77,6 +89,7 @@ def load_model_and_tokenizer(
 
     _model, _tokenizer = _load_fallback()
     _model_type = "dense"
+    _model_key = cache_key
     return _model, _tokenizer
 
 
@@ -97,6 +110,9 @@ def _load_primary():
         PRIMARY_MODEL,
         trust_remote_code=True,
     )
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     # BitsAndBytes 4-bit config for MoE
     from transformers import BitsAndBytesConfig
@@ -107,13 +123,21 @@ def _load_primary():
         bnb_4bit_use_double_quant=True,
     )
 
+    attn_implementation = "sdpa"
+    try:
+        import flash_attn  # noqa: F401
+
+        attn_implementation = "flash_attention_2"
+    except Exception:
+        pass
+
     model = AutoModelForCausalLM.from_pretrained(
         PRIMARY_MODEL,
         quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
     )
 
     model = prepare_model_for_kbit_training(model)
@@ -151,6 +175,9 @@ def _load_fallback():
         load_in_8bit=False,
         full_finetuning=False,
     )
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     model = FastLanguageModel.get_peft_model(
         model,
@@ -164,6 +191,30 @@ def _load_fallback():
     PatchFastRL("GRPO", FastLanguageModel)
 
     print(f"Fallback model loaded: {FALLBACK_MODEL}")
+    return model, tokenizer
+
+
+def _load_portable_dev_model():
+    """Portable non-Linux fallback used for local control-plane validation."""
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    print(f"Loading portable dev model: {DEV_MODEL}")
+    tokenizer = AutoTokenizer.from_pretrained(DEV_MODEL, trust_remote_code=True)
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    model = AutoModelForCausalLM.from_pretrained(
+        DEV_MODEL,
+        trust_remote_code=True,
+        torch_dtype=torch.float32,
+    )
+    if hasattr(model, "gradient_checkpointing_enable"):
+        model.gradient_checkpointing_enable()
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Portable dev model loaded: {trainable:,} trainable / {total:,} total params")
     return model, tokenizer
 
 
@@ -181,6 +232,9 @@ def _load_from_checkpoint(checkpoint_path: str):
             max_seq_length=MAX_SEQ_LENGTH,
             load_in_4bit=True,
         )
+        if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+            tokenizer.pad_token = tokenizer.eos_token
+        tokenizer.padding_side = "left"
         print(f"Loaded checkpoint via Unsloth: {checkpoint_path}")
         return model, tokenizer
     except Exception:
@@ -191,6 +245,9 @@ def _load_from_checkpoint(checkpoint_path: str):
     from peft import PeftModel
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
+    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     bnb_config = BitsAndBytesConfig(
         load_in_4bit=True,

@@ -7,6 +7,8 @@ Output schema (one JSON object per line):
     "difficulty": int,
     "data_source": "doublegraph_a100" | "ops_6k",
     "task_code": str | None,
+    "evaluation_backend": "wcc" | "ops6k" | "unsupported",
+    "support_reason": str,
     "topology": str | None,
     "graph_properties": dict | None,
     "kernel_id": str | None,
@@ -29,6 +31,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from training.curriculum import CurriculumManager
+from training.task_support import infer_evaluation_backend, parse_ops, support_reason
 
 DATASETS_DIR = Path(__file__).resolve().parent
 if str(DATASETS_DIR) not in sys.path:
@@ -38,6 +41,7 @@ from extract_doublegraph_a100 import ALGO_DISPLAY_NAMES, CATEGORY_META
 
 DEFAULT_DG_MANIFEST = ROOT / "docs" / "research" / "doublegraph" / "doublegraph_a100_manifest.jsonl"
 DEFAULT_OUTPUT_PATH = ROOT / "datasets" / "combined_kernelforge.jsonl"
+DEFAULT_LOCAL_OPS_PATH = ROOT / "archive" / "datasets_legacy" / "curated_200.jsonl"
 CUDA_AGENT_DATASET_ID = "BytedTsinghua-SIA/CUDA-Agent-Ops-6K"
 
 
@@ -120,12 +124,24 @@ def _load_hf_ops6k_split():
     cwd = os.getcwd()
     orig_sys_path = list(sys.path)
     try:
-        sys.path = [p for p in sys.path if p not in ("", ".", cwd)]
+        shadow_paths = {"", ".", cwd, str(ROOT), str(DATASETS_DIR)}
+        sys.path = [p for p in sys.path if p not in shadow_paths]
         import datasets as hf_datasets  # noqa: WPS433
 
         return hf_datasets.load_dataset(CUDA_AGENT_DATASET_ID, split="train")
     finally:
         sys.path = orig_sys_path
+
+
+def _load_local_ops_split(path: str | Path = DEFAULT_LOCAL_OPS_PATH) -> list[dict[str, Any]]:
+    """Fallback local prompt corpus for offline development."""
+    rows: list[dict[str, Any]] = []
+    with Path(path).open() as f:
+        for line in f:
+            raw = line.strip()
+            if raw:
+                rows.append(json.loads(raw))
+    return rows
 
 
 def _difficulty_from_variant(variant: str) -> int:
@@ -234,6 +250,20 @@ def load_doublegraph_manifest(manifest_path: str | Path) -> list[dict[str, Any]]
                     "difficulty": _difficulty_from_variant(str(item.get("variant", "base"))),
                     "data_source": "doublegraph_a100",
                     "task_code": None,
+                    "evaluation_backend": infer_evaluation_backend(
+                        {
+                            "prompt": _doublegraph_prompt(item),
+                            "ops": [str(item.get("algorithm_name", "unknown"))],
+                            "kernel_id": item.get("kernel_id"),
+                        }
+                    ),
+                    "support_reason": support_reason(
+                        {
+                            "prompt": _doublegraph_prompt(item),
+                            "ops": [str(item.get("algorithm_name", "unknown"))],
+                            "kernel_id": item.get("kernel_id"),
+                        }
+                    ),
                     "topology": graph_props.get("type"),
                     "graph_properties": graph_props,
                     "kernel_id": item.get("kernel_id"),
@@ -251,11 +281,13 @@ def load_ops6k(max_samples: int | None = None, seed: int = 42) -> list[dict[str,
         return []
 
     _build_cuda_prompt, _parse_ops = _get_cuda_agent_helpers()
-    ds = _load_hf_ops6k_split()
-    if max_samples is not None:
-        max_samples = max(0, int(max_samples))
-        if len(ds) > max_samples:
-            ds = ds.shuffle(seed=seed).select(range(max_samples))
+    data_source = "ops_6k"
+    try:
+        ds = _load_hf_ops6k_split()
+    except Exception as exc:
+        print(f"Falling back to local curated ops dataset: {exc}")
+        ds = _load_local_ops_split()
+        data_source = "ops_local_fallback"
 
     rows: list[dict[str, Any]] = []
     for item in ds:
@@ -263,20 +295,34 @@ def load_ops6k(max_samples: int | None = None, seed: int = 42) -> list[dict[str,
         if not prompt:
             continue
         ops = _parse_ops(item.get("ops"))
+        row = {
+            "prompt": prompt,
+            "ops": parse_ops(ops),
+            "difficulty": _difficulty_from_ops(ops),
+            "data_source": data_source,
+            "task_code": str(item.get("code", "")),
+            "topology": None,
+            "graph_properties": None,
+            "kernel_id": None,
+            "expert_code": None,
+            "compile_flags": None,
+        }
+        row["evaluation_backend"] = infer_evaluation_backend(row)
+        row["support_reason"] = support_reason(row)
         rows.append(
-            {
-                "prompt": prompt,
-                "ops": ops,
-                "difficulty": _difficulty_from_ops(ops),
-                "data_source": "ops_6k",
-                "task_code": str(item.get("code", "")),
-                "topology": None,
-                "graph_properties": None,
-                "kernel_id": None,
-                "expert_code": None,
-                "compile_flags": None,
-            }
+            row
         )
+
+    if max_samples is not None:
+        max_samples = max(0, int(max_samples))
+        rng = random.Random(seed)
+        supported_rows = [row for row in rows if row.get("evaluation_backend") == "ops6k"]
+        unsupported_rows = [row for row in rows if row.get("evaluation_backend") != "ops6k"]
+        rng.shuffle(supported_rows)
+        rng.shuffle(unsupported_rows)
+        rows = supported_rows[:max_samples]
+        if len(rows) < max_samples:
+            rows.extend(unsupported_rows[: max_samples - len(rows)])
 
     return rows
 

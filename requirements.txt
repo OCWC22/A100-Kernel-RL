@@ -7,10 +7,14 @@
 #
 # unsloth 2026.3.3 with --no-deps + PatchFastRL("GRPO", FastLanguageModel)
 # See: https://github.com/unslothai/unsloth/releases/tag/December-2025
-trl[vllm]>=0.29.0             # GRPOTrainer + rollout_func + generate_rollout_completions
+trl[vllm]>=0.29.0; platform_system == "Linux"   # Full GRPO + vLLM stack on B200/A100 Linux
+trl>=0.29.0; platform_system != "Linux"         # Control-plane install for macOS preflight
 transformers>=4.56.2,!=5.0.0,!=5.1.0  # Per trl 0.29.0 + unsloth exclusions
 datasets>=3.0
 accelerate>=1.4.0             # Required by trl 0.29.0
+peft>=0.17.0
+bitsandbytes>=0.45.0; platform_system == "Linux"
+torch>=2.6.0; platform_system != "Linux"
 # torch version determined by vllm (pinned by trl[vllm]); do NOT specify here
 
 # OpenEnv

@@ -52,10 +52,14 @@ dependencies = [
 train = [
     # unsloth is NOT listed here — install separately with: pip install --no-deps unsloth unsloth_zoo
     # This bypasses unsloth's stale trl<=0.24.0 cap (fixed in Dec 2025 release)
-    "trl[vllm]==0.29.0",  # Pin to Gate G-0.6 validated version — do NOT upgrade without re-running gate
+    "trl[vllm]==0.29.0; platform_system == 'Linux'",  # Full training stack on Linux/B200
+    "trl==0.29.0; platform_system != 'Linux'",  # Control-plane install for macOS dev/preflight
     "transformers>=4.56.2,!=5.0.0,!=5.1.0",
     "datasets>=3.0",
     "accelerate>=1.4.0",
+    "peft>=0.17.0",
+    "bitsandbytes>=0.45.0; platform_system == 'Linux'",
+    "torch>=2.6.0; platform_system != 'Linux'",
     # torch version is determined by vllm (pinned by trl[vllm]); don't specify here
 ]
 openenv = [

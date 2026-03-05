@@ -5,13 +5,29 @@ from __future__ import annotations
 import ast
 import json
 import os
+import sys
+from pathlib import Path
 from typing import Any
-
-from datasets import Dataset, load_dataset
 
 CUDA_AGENT_DATASET_ID = "BytedTsinghua-SIA/CUDA-Agent-Ops-6K"
 TARGET_GPU_NAME = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
+ROOT = Path(__file__).resolve().parents[1]
+LOCAL_DATASETS_DIR = ROOT / "datasets"
+
+
+def _load_hf_datasets():
+    """Import the Hugging Face datasets package without shadowing the local datasets dir."""
+    cwd = os.getcwd()
+    orig_sys_path = list(sys.path)
+    try:
+        shadow_paths = {"", ".", cwd, str(ROOT), str(LOCAL_DATASETS_DIR)}
+        sys.path = [path for path in sys.path if path not in shadow_paths]
+        import datasets as hf_datasets  # noqa: WPS433
+
+        return hf_datasets
+    finally:
+        sys.path = orig_sys_path
 
 
 def _parse_ops(ops: Any) -> list[str]:
@@ -59,18 +75,26 @@ def _build_cuda_prompt(example: dict[str, Any], max_code_chars: int = 6000) -> s
         "```python\n"
         f"{code}\n"
         "```\n\n"
-        "Return CUDA/C++ code only, with a callable binding function and correctness-focused logic."
+        "Return a single CUDA/C++ source file only.\n"
+        "The source must:\n"
+        "- include `#include <torch/extension.h>`\n"
+        "- define a callable `run_kernel(...)` entrypoint\n"
+        "- export `run_kernel` via `PYBIND11_MODULE(TORCH_EXTENSION_NAME, m)`\n"
+        "- accept the tensors returned by `get_inputs()` and return outputs matching `Model(*inputs)`\n"
+        "- include a `// CU_FLAGS:` comment if extra nvcc flags are required\n"
+        "Do not return prose or Python wrappers."
     )
 
 
-def load_cuda_agent_prompt_dataset(max_samples: int | None = 1024, seed: int = 42) -> Dataset:
+def load_cuda_agent_prompt_dataset(max_samples: int | None = 1024, seed: int = 42):
     """Load CUDA-Agent-Ops-6K and convert rows to prompt-only dataset."""
-    ds = load_dataset(CUDA_AGENT_DATASET_ID, split="train")
+    hf_datasets = _load_hf_datasets()
+    ds = hf_datasets.load_dataset(CUDA_AGENT_DATASET_ID, split="train")
 
     if max_samples is not None:
         max_samples = max(0, int(max_samples))
         if max_samples == 0:
-            return Dataset.from_list([])
+            return hf_datasets.Dataset.from_list([])
         if len(ds) > max_samples:
             ds = ds.shuffle(seed=seed).select(range(max_samples))
 
@@ -85,7 +109,7 @@ def load_cuda_agent_prompt_dataset(max_samples: int | None = 1024, seed: int = 4
                 "data_source": str(row.get("data_source", "")),
             })
 
-    return Dataset.from_list(prompts)
+    return hf_datasets.Dataset.from_list(prompts)
 
 
 def load_cuda_agent_prompt_texts(max_samples: int = 128, seed: int = 42) -> list[str]:

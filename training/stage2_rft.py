@@ -11,6 +11,13 @@ explosion and training collapse (Table 2, arXiv:2602.24286).
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
+
+if __package__ in {None, ""}:
+    ROOT = Path(__file__).resolve().parents[1]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
 
 from trl import SFTConfig, SFTTrainer
 
@@ -21,6 +28,7 @@ STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stag
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
 NUM_TRAJECTORIES = int(os.getenv("KERNELFORGE_RFT_TRAJECTORIES", "50"))
 MIN_REWARD = float(os.getenv("KERNELFORGE_RFT_MIN_REWARD", "1.0"))
+USE_BF16 = sys.platform.startswith("linux")
 
 
 def main():
@@ -44,7 +52,8 @@ def main():
 
     # Step 4: Load model from Stage 1 checkpoint and train
     print(f"Loading Stage 1 checkpoint from {STAGE1_OUTPUT}...")
-    model, tokenizer = load_model_and_tokenizer(checkpoint_path=STAGE1_OUTPUT)
+    checkpoint_path = STAGE1_OUTPUT if os.path.exists(STAGE1_OUTPUT) else None
+    model, tokenizer = load_model_and_tokenizer(checkpoint_path=checkpoint_path)
 
     config = SFTConfig(
         output_dir=OUTPUT_DIR,
@@ -54,7 +63,7 @@ def main():
         num_train_epochs=3,
         logging_steps=1,
         save_steps=50,
-        bf16=True,
+        bf16=USE_BF16,
         report_to="none",
         max_seq_length=8192,
     )
@@ -64,6 +73,7 @@ def main():
         processing_class=tokenizer,
         args=config,
         train_dataset=rft_dataset,
+        dataset_text_field="text",
     )
 
     print("Starting Stage 2 SFT training on filtered trajectories...")

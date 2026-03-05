@@ -22,25 +22,37 @@ See docs/GRPO_DEEP_DIVE.md GRPO-14 for full stacked architecture.
 from __future__ import annotations
 
 import os
+import sys
+from pathlib import Path
 
-from datasets import Dataset
+if __package__ in {None, ""}:
+    ROOT = Path(__file__).resolve().parents[1]
+    if str(ROOT) not in sys.path:
+        sys.path.insert(0, str(ROOT))
+
 from trl import GRPOConfig
 
 from training.custom_grpo_trainer import TRLOOGRPOTrainer
 from training.model_loader import load_model_and_tokenizer
-from training.curriculum import CurriculumManager
-from training.dataset_loader import load_training_dataset
+from training.curriculum import CurriculumManager, format_problem_prompt
+from training.dataset_loader import Dataset, load_training_dataset
 from training.multi_turn_rollout import make_multi_turn_rollout
+from training.task_support import normalize_task_row
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 STAGE2_OUTPUT = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
+STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stage1")
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE3_OUTPUT", "outputs/kernelforge-stage3")
+IS_LINUX = sys.platform.startswith("linux")
+USE_VLLM = os.getenv("KERNELFORGE_USE_VLLM", "1") == "1" and IS_LINUX
+OPTIMIZER = "paged_adamw_8bit" if IS_LINUX else "adamw_torch"
+USE_BF16 = IS_LINUX
 
-# Multi-turn configuration (P3 demo defaults)
-MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "3"))
-MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "10"))
+# Multi-turn configuration
+MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "5"))
+MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "150"))
 # B200 local compile check for fast-fail; Modal A100 for performance reward.
 # Set LOCAL_COMPILE_CHECK=0 to skip local compile pre-check (slower but simpler).
 LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_STAGE3_LOCAL_COMPILE", "1") == "1"
@@ -69,13 +81,34 @@ def reward_from_env_with_curriculum(completions, **kwargs) -> list[float]:
 
 # --- Dataset: curriculum-aware prompt generation ---
 
-def build_curriculum_dataset(num_prompts: int = 200) -> Dataset:
+def build_curriculum_dataset(num_prompts: int = 200) -> tuple[Dataset, list[dict]]:
     """Generate prompts from curriculum manager, sampling from current phase."""
     prompts = []
+    sampled_rows = []
     for _ in range(num_prompts):
-        problem = curriculum.get_problem()
-        prompts.append({"prompt": problem["prompt"]})
-    return Dataset.from_list(prompts)
+        problem = None
+        for _attempt in range(32):
+            candidate = normalize_task_row(curriculum.get_problem())
+            if candidate.get("supports_evaluation"):
+                problem = candidate
+                break
+        if problem is None:
+            problem = normalize_task_row(
+                {
+                    "prompt": (
+                        f"Write a CUDA Weakly Connected Components kernel for {TARGET_GPU} ({TARGET_ARCH}) "
+                        "using union-find with path compression."
+                    ),
+                    "ops": ["weakly_connected_components"],
+                    "difficulty": 1,
+                    "data_source": "stage3_fallback",
+                }
+            )
+        sampled = problem
+        sampled["prompt"] = format_problem_prompt(sampled)
+        prompts.append(sampled)
+        sampled_rows.append(sampled)
+    return Dataset.from_list(prompts), sampled_rows
 
 
 # --- Training ---
@@ -88,8 +121,7 @@ def main():
     print(f"  Max training steps: {MAX_STEPS}")
 
     try:
-        ops6k_max_env = os.getenv("KERNELFORGE_STAGE3_OPS6K_MAX", "")
-        ops6k_max = int(ops6k_max_env) if ops6k_max_env.strip() else None
+        ops6k_max = int(os.getenv("KERNELFORGE_STAGE3_OPS6K_MAX", "128"))
         combined_rows = load_training_dataset(
             stage="stage3",
             ops6k_max=ops6k_max,
@@ -102,33 +134,40 @@ def main():
         print(f"  Could not inject combined dataset into curriculum: {e}")
         print("  Continuing with built-in curriculum problems only")
 
-    model, tokenizer = load_model_and_tokenizer(checkpoint_path=STAGE2_OUTPUT)
-    dataset = build_curriculum_dataset(num_prompts=200)
+    checkpoint_path = None
+    if os.path.exists(STAGE2_OUTPUT):
+        checkpoint_path = STAGE2_OUTPUT
+    elif os.path.exists(STAGE1_OUTPUT):
+        checkpoint_path = STAGE1_OUTPUT
+
+    model, tokenizer = load_model_and_tokenizer(checkpoint_path=checkpoint_path)
+    dataset, sampled_rows = build_curriculum_dataset(num_prompts=200)
 
     rollout_func = make_multi_turn_rollout(
         max_turns=MAX_TURNS,
         skill_md_gpu=TARGET_GPU.lower(),
+        problem_metadata=sampled_rows,
     )
 
     config = GRPOConfig(
         learning_rate=5e-6,
         temperature=0.7,         # Lower temp for exploitation
-        num_generations=2,          # Reduced from 4 (fewer zero-gradient steps)
-        max_prompt_length=512,
+        num_generations=2,
+        max_prompt_length=4096,
         max_completion_length=4096,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         max_steps=MAX_STEPS,
-        optim="paged_adamw_8bit",
-        bf16=True,
+        optim=OPTIMIZER,
+        bf16=USE_BF16,
         report_to="none",
         output_dir=OUTPUT_DIR,
         logging_steps=1,
         top_k=50,
         top_p=0.95,
         repetition_penalty=1.05,
-        use_vllm=True,
-        vllm_mode="colocate",
+        use_vllm=USE_VLLM,
+        vllm_mode="colocate" if USE_VLLM else "server",
     )
 
     trainer = TRLOOGRPOTrainer(
