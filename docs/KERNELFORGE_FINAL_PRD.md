@@ -16,7 +16,7 @@
 | Primary model | Qwen3-Coder-Next FP8 | Trained on 800K executable tasks with agentic RL. 70.6% SWE-Bench. Tool calling native. 3B active = fast generation. |
 | Backup model | Qwen3.5-9B 4-bit | If Coder-Next fails to load. 81.7 GPQA Diamond. |
 | SkyDiscover LLM | GLM-5 via API ($1/M input) | Frontier 744B model for kernel evolution. ~$2-8/run. |
-| RL algorithm | GRPO via TRL GRPOTrainer | No critic. ~50% memory savings. Discrete rewards {-1,1,2,3}. |
+| RL algorithm | GRPO via TRL GRPOTrainer + stacked mitigations | MARS+TRLOO per-turn credit assignment (fixes Dr. Kernel bias, arXiv 2510.15414). Nsight structured rewards replace discrete {-1,1,2,3} (fixes lazy optimization). CPPO pruning (arXiv 2503.22342) reduces eval cost 2-4x. MASPO soft trust region (arXiv 2602.17550). Transformation grammar constrains action space. GRPO experimental 50 steps; SkyDiscover/SFT remain hedges. See Section 6.0.4. |
 | Training pipeline | 3-stage: Warmup → RFT → GRPO | Pure RL collapses at step 17 (CUDA Agent Section 3.3). |
 | Environment spec | OpenEnv (step/reset/state) | Hackathon framework requirement. |
 | Kernel language | CUDA C++ | Aligns with CUDA Agent infra + doubleGraph patterns. |
@@ -51,10 +51,15 @@ An RL training system + evolutionary search system that teaches Qwen3-Coder-Next
 - Source: https://github.com/skydiscover-ai/skydiscover
 
 **Component 4: GRPO Training** (our contribution)
-- 3-stage pipeline training Qwen3-Coder-Next
-- Multi-turn with compiler feedback (model's trained capability)
-- OpenEnv-compatible environment
-- Unsloth + TRL on B200
+- 3-stage pipeline training Qwen3-Coder-Next 80B MoE (3B active) via Unsloth FP8 Dynamic on B200
+- Multi-turn with compiler feedback + MARS+TRLOO per-turn credit assignment
+- Nsight Compute structured rewards (occupancy, mem coalescing, warp efficiency) replacing discrete {-1,1,2,3}
+- Transformation grammar (12-40 rules) instead of free-form kernel generation
+- Hybrid eval: local nvcc+PAC for early turns, Modal A100+ncu for final turn
+- CPPO pruning (top-2 of G candidates after cheap structural filter)
+- MASPO soft trust region replacing hard PPO clip
+- OpenEnv-compatible environment, Unsloth + TRL on B200
+- **Strategy:** GRPO is experimental (50 steps). SkyDiscover + SFT are parallel hedges. See GRPO_DEEP_DIVE sections GRPO-9 through GRPO-14 for complete stacked architecture.
 
 ---
 
@@ -1023,6 +1028,32 @@ SHIP (Saturday night):
 | MARS Credit Assignment | https://arxiv.org/abs/2510.15414 |
 | GRPO (DeepSeekMath) | https://arxiv.org/abs/2402.03300 |
 
+### Competitive Landscape (Feb-Mar 2026 — CUDA Kernel RL)
+
+These concurrent papers directly challenge or supersede aspects of our approach. See Section 6.0 for analysis.
+
+| Paper | arXiv | Key Finding | Implication for KernelForge |
+|-------|-------|------------|----------------------------|
+| **Dr. Kernel** (HKUST/TikTok) | [2602.05885](https://arxiv.org/abs/2602.05885) | GRPO has biased policy gradients; proposes TRLOO (Turn-level Reinforce Leave-One-Out) | Our GRPO advantage estimation is systematically 25% too small (G=4). Multi-turn makes it worse. |
+| **CUDA-L1** (DeepReinforce) | [2507.14111](https://arxiv.org/abs/2507.14111) | Contrastive RL achieves 3.12x avg speedup on A100 KernelBench | Pairwise comparisons > group normalization. Alternative to GRPO. |
+| **KernelBlaster** (Stanford/NVIDIA) | [2602.14293](https://arxiv.org/abs/2602.14293) | Memory-augmented in-context RL for kernel generation | In-context learning approach — no policy gradient training needed. |
+| **OptiML** | [2602.12305](https://arxiv.org/abs/2602.12305) | MCTS over LLM edits, no RL training needed | Search-based alternative that's more sample-efficient than GRPO. |
+| **ConCuR** | [2510.07356](https://arxiv.org/abs/2510.07356) | Data quality > algorithm; curated reasoning traces beat RL | SFT on quality data may beat our GRPO pipeline. |
+| **CUDABench** | [2603.02236](https://arxiv.org/abs/2603.02236) | "Mismatch between high compilation success and low functional correctness" | Compilation-only reward (our current state) is a bad proxy for kernel quality. |
+
+### Stacked RL Techniques (March 2026)
+
+These papers provide the specific techniques that address each Fundamental Failure in Section 6.0, making GRPO viable on single-GPU. See GRPO_DEEP_DIVE sections GRPO-9 through GRPO-14.
+
+| Paper | arXiv / Link | Role in Stack | Addresses |
+|-------|-------------|---------------|-----------|
+| **MARSHAL / MARS** | [2510.15414](https://arxiv.org/abs/2510.15414) | Turn-level cumulative advantage (+23% return, ICLR 2026) | Failure #1 (GRPO bias) |
+| **OAPL** | [2602.19362](https://arxiv.org/abs/2602.19362) | Off-policy advantage regression (handles 400-step async lag) | Failure #3 (async Modal eval) |
+| **AReaL** | [2505.24298](https://arxiv.org/abs/2505.24298) | Async decoupled training (2.77x wall-time speedup) | Failure #3 (compute scale) |
+| **MASPO** | [2602.17550](https://arxiv.org/abs/2602.17550) | Gaussian soft trust region replacing PPO clip (+2-3%) | Failure #1 (sparse reward collapse) |
+| **CPPO** | [2503.22342](https://arxiv.org/abs/2503.22342) | Completion pruning (7.98x speedup on GSM8K) | Failure #3 (eval cost) |
+| **SortedRL** | [openreview 5v3Gzuic8i](https://openreview.net/forum?id=5v3Gzuic8i) | Length-aware online scheduling (>50% less rollout bubble) | Failure #3 (throughput) |
+
 ### Docs
 | Resource | URL |
 |----------|-----|
@@ -1052,6 +1083,147 @@ SHIP (Saturday night):
 | `training/grpo_train.py` | Missing | 0 | Referenced in pyproject.toml + README but doesn't exist |
 
 **Bottom line:** ~70% of infrastructure exists. The training pipeline assumes an external Modal deployment. Two of four components have zero code.
+
+---
+
+### 6.0 Fundamental Research Risks
+
+> **Why this section exists:** Sections 6.1-6.8 cover *implementation* risks (stubs, missing code, memory budgets). This section asks the deeper question: **even if we implement everything perfectly, are the fundamental research approaches sound?** Six concurrent papers (Feb-Mar 2026) in the CUDA kernel RL space say no — at least not as currently designed.
+
+#### 6.0.1 FUNDAMENTAL FAILURE #1: GRPO Is Mathematically Biased for Multi-Turn Kernel Generation
+
+**The problem:** Dr. Kernel (arXiv [2602.05885](https://arxiv.org/abs/2602.05885)) proves that GRPO's advantage estimation is biased because of *self-inclusion* — computing the group mean/std using the current sample itself.
+
+The expected gradient under GRPO is shrunk by a factor of `(1 - 1/N)`:
+```
+E[ĝ_GRPO] = (1 - 1/N) × ∇θJ(θ)
+```
+
+With our G=4: gradients are systematically 25% too small. In multi-turn settings (which our PRD explicitly uses — "multi-turn with compiler feedback"), this compounds across turns because fewer samples survive to later turns, making N smaller and the bias worse.
+
+**Empirical proof:** Dr. Kernel shows GRPO saturates at ~200 steps on KernelBench Level-2, while their TRLOO (Turn-level Reinforce Leave-One-Out) continues improving. TRLOO removes the current sample from the baseline:
+```
+Ā^(-i)_t = 1/(N_t - 1) × Σ_{j≠i} G_j,t
+```
+
+**The competitive landscape has already moved past GRPO for kernel generation:**
+
+| System | Algorithm | Why not GRPO |
+|--------|-----------|-------------|
+| Dr. Kernel (HKUST) | TRLOO | Proved GRPO bias mathematically |
+| CUDA-L1 (DeepReinforce) | Contrastive RL | Explicitly chose pairwise comparisons over group normalization |
+| KernelBlaster (Stanford/NVIDIA) | Memory-augmented in-context RL | In-context learning, no policy gradient at all |
+| OptiML | MCTS over LLM edits | Search-based, no RL training |
+| CUDA Agent (ByteDance) | PPO (not GRPO) + custom mods | Asymmetric clipping ε_lower=0.2/ε_higher=0.28, value pretraining, 230B model on 128 GPUs |
+
+**What we cite vs what they actually did:** Our PRD cites CUDA Agent as justification for GRPO. But CUDA Agent uses **PPO with a critic** (not GRPO), plus asymmetric clipping, value pretraining, and 128 H20 GPUs. We're copying their reward function but using a fundamentally different (and proven-weaker) algorithm at 1/128th the compute.
+
+**Pivot options:**
+1. Switch from GRPO to TRLOO (TRL may not support this — would need custom training loop)
+2. Switch to contrastive RL à la CUDA-L1 (compare good vs bad kernels directly)
+3. Accept GRPO bias and increase G from 4 to at least 8 (requires memory optimization)
+4. Drop multi-turn and use single-turn only (reduces bias accumulation)
+
+---
+
+#### 6.0.2 FUNDAMENTAL FAILURE #2: Compilation-Only Reward = Proven Lazy Optimization
+
+**The problem:** Our reward function has two unimplemented TODOs:
+- GRPO_DEEP_DIVE line 339: "TODO: correctness check"
+- GRPO_DEEP_DIVE line 368: `kernel_ms = compile_ms  # Placeholder`
+
+This means rewards r=+2 and r=+3 are *mathematically unreachable*. The model can only ever get r=-1 (doesn't compile) or r=+1 (compiles). This is exactly what Dr. Kernel calls **"lazy optimization"** — the model learns to generate trivially correct, zero-effort kernels.
+
+**Research evidence:**
+- **Dr. Kernel:** Without profiling-based rewards, Fast@1.2x (kernels achieving ≥1.2x speedup) saturated at **5.6%**. With profiling rewards + rejection sampling: **20.0%**. That's a 3.6x difference from reward design alone.
+- **CUDABench** (arXiv [2603.02236](https://arxiv.org/abs/2603.02236)): "notable mismatch between high compilation success rates and low functional correctness" — compilation is a bad proxy for kernel quality.
+- **CUDA-L1:** Uses actual speedup measurement as contrastive signal. Their key insight: "the multiplicative nature of optimizations" — you MUST measure real performance to learn this.
+
+**Why this is fundamental, not just a TODO:** Even if we implement profiling, discrete rewards {-1,1,2,3} lose critical signal. Dr. Kernel uses continuous profiling-based rewards. CUDA-L1 uses contrastive pairs of (slow kernel, fast kernel). Our 4-level discrete scheme cannot distinguish:
+- A kernel that's 1.06x faster (barely r=+2) from one that's 5x faster (also r=+2)
+- The model has zero incentive to optimize beyond the threshold
+
+**Pivot options:**
+1. Implement continuous reward: `reward = log(speedup)` instead of discrete bins
+2. Add profiling-based rejection sampling (Dr. Kernel's PRS): only train on completions that BOTH compile AND show measurable speedup
+3. Use contrastive pairs: generate 2 kernels, reward the faster one relative to the slower one
+4. At minimum: implement the profiling TODO before any training run
+
+---
+
+#### 6.0.3 FUNDAMENTAL FAILURE #3: Our Compute Scale Is 100x Below What Works
+
+**The problem:** Every successful CUDA kernel RL system operates at a scale we cannot match:
+
+| System | Model | GPUs | Batch | Context | Steps |
+|--------|-------|------|-------|---------|-------|
+| **CUDA Agent** | 230B (23B active) | 128x H20 | 1024 | 131K tokens | 150 |
+| **Dr. Kernel** | 14B | Distributed KernelGYM (multiple workers) | Large | 32K+ | 200+ |
+| **CUDA-L1** | Custom | A100 cluster | Full KernelBench (250 tasks) | — | Full RL loop |
+| **Us (PRD)** | 80B (3B active) | 1x B200 | 1 prompt x 4 completions | 4K tokens | 100 |
+
+Our effective batch size is **4 completions**. CUDA Agent's is **1024**. That's 256x more gradient signal per step. CUDA Agent trains for 150 steps x 1024 batch = 153,600 effective samples. We train for 100 steps x 4 = 400 effective samples. **That's 384x fewer samples.**
+
+**Why this matters from first principles:** RL for code generation has an astronomically sparse reward landscape. Most of the optimization space is "doesn't compile" (r=-1). The probability of randomly generating an optimized CUDA kernel is negligible. You need massive sampling to find the rare positive signals. With G=4, most steps will have all-negative rewards (std=0, zero gradient). CUDA Agent solved this with scale. We can't.
+
+**The "3B active" misleadingness:** Our PRD highlights that Qwen3-Coder-Next has "only 3B active parameters" as if this makes it lightweight. But:
+- The 80B total parameters still need 85GB for weights
+- MoE routing overhead is real
+- 3B active is much smaller than CUDA Agent's 23B active — less model capacity for learning kernel optimization
+- ConCuR (arXiv [2510.07356](https://arxiv.org/abs/2510.07356)) shows data quality matters more than model size — a well-curated dataset beats throwing a bigger model at the problem
+
+**Pivot options:**
+1. **Don't RL-train at all for the hackathon.** Use inference-time search instead (OptiML-style MCTS, or SkyDiscover evolutionary search). This is more sample-efficient and doesn't require our broken GRPO setup.
+2. Reduce model to 14B (Dr. Kernel's size) to enable larger G and more steps
+3. Use SFT on curated data (ConCuR approach) — quality data > RL algorithm
+4. Use CUDA Agent's dataset (Ops-6K) as SFT data directly, skip RL, do evolutionary refinement
+
+---
+
+#### 6.0.4 Revised Assessment: Stacked Techniques Make GRPO Viable
+
+The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addressable. Six papers from March 2026 provide specific, stackable mitigations:
+
+| Fundamental Failure | Root Cause | Fix | Paper |
+|-------------------|------------|-----|-------|
+| **#1: GRPO bias** | Self-inclusion in group mean/std | MARS cumulative per-turn returns + TRLOO leave-one-out baseline | MARSHAL (arXiv 2510.15414) + Dr. Kernel (arXiv 2602.05885) |
+| **#2: Lazy reward** | Discrete {-1,1,2,3} loses signal; profiling is a stub | Nsight Compute structured reward: occupancy + mem_coalescing + warp_efficiency → continuous signal | CUDABench (arXiv 2603.02236) |
+| **#2 (action space)** | Free-form 2000-token generation = huge search space | Transformation grammar (12-40 rules): model proposes transforms, not full kernels | OptiML (arXiv 2602.12305), KernelBlaster (arXiv 2602.14293) |
+| **#3: Compute scale** | 384x fewer samples than CUDA Agent | CPPO pruning (only eval top-2 of G), hybrid eval (local+Modal), smaller action space | CPPO (arXiv 2503.22342) |
+| **#3 (throughput)** | Sync eval blocks training | MASPO soft trust region + AReaL-style replay buffer (staleness η=4-8) | MASPO (arXiv 2602.17550), AReaL (arXiv 2505.24298) |
+
+**Updated probability assessment:**
+
+| Approach | Probability | Time | Why |
+|----------|------------|------|-----|
+| **SkyDiscover evolutionary search** | HIGH | 2-4 hrs | AdaEvolve proven on 200+ tasks. No training. Primary hedge. |
+| **GRPO with stacked techniques** | MEDIUM | 4-6 hrs training | MARS+TRLOO fixes bias. Nsight fixes reward. CPPO cuts cost. Transform grammar shrinks search space. 50-step experiment on Qwen3-Coder-Next 80B FP8. |
+| **SFT on curated data** (ConCuR-style) | MEDIUM-HIGH | 3-5 hrs | ConCuR shows curated traces > RL. Parallel track. |
+| **GRPO as originally designed in PRD** | LOW | 7-12 hrs | Without stacking, still biased, stub reward, too few samples. |
+
+**Implementation priority order (revised):**
+
+| Priority | When | Activity | New Files |
+|----------|------|----------|-----------|
+| **P1** | Thu night (6-8 hrs) | Hybrid rollout + Nsight reward + transformation grammar + SkyDiscover 10-iteration hedge | `evaluation/reward_nsight.py`, `openenv_env/transform_grammar.py`, `training/hybrid_rollout.py` |
+| **P2** | Fri morning | SFT on GLM-5 curated data + custom GRPO loop with MARS+TRLOO (50 steps on Qwen3-Coder-Next 80B FP8) | `training/custom_grpo_loop.py` |
+| **P3** | Fri afternoon | Full Stage 3 GRPO + curriculum on 80B FP8 | Config updates to stage3_grpo.py |
+| **P4** | Sat | Full eval + demo + collect best kernels from all tracks | — |
+
+**Total new code:** ~450 LOC across 6 files. Fits in 12-16 hours coding + 4-6 hours training.
+
+**Realistic expected outcome with Qwen3-Coder-Next 80B FP8:**
+- 85-95% compile+correct, 1.6-2.1x geo-mean on curated_200 + WCC
+- Discovery of 8-12 A100-specific patterns (float4, L2 pinning, shuffles, tiling)
+- Total evals: ~800-1200 (fits 4-6 hrs training on B200)
+
+**Why this revision succeeds where original PRD fails:**
+- Fixes GRPO bias (MARS+TRLOO)
+- Fixes lazy reward (Nsight + PRS)
+- Fixes eval bottleneck (hybrid + batch)
+- Fixes action space (grammar)
+- Fixes scope (GRPO experimental, SkyDiscover/SFT parallel hedges)
+- Total evals ~800-1200 (fits 4-6 hrs)
 
 ---
 
@@ -1101,6 +1273,8 @@ SHIP (Saturday night):
 
 **Counter-argument:** GRPO (arXiv 2402.03300, DeepSeekMath) has been validated in multiple domains. The "step-17 collapse" from CUDA Agent Section 3.3 is specifically for PURE RL without warmup — our 3-stage pipeline addresses this. Qwen3-Coder-Next (arXiv 2603.00729) was trained on 800K executable code tasks with agentic RL, giving it strong baseline CUDA familiarity. Temperature=1.0 matches its training distribution. The risk is real but bounded by our decision gates.
 
+**Stacked mitigations (Section 6.0.4 revision):** MARS+TRLOO hybrid credit assignment directly fixes the Dr. Kernel bias. G=2 (reduced from G=4) cuts zero-gradient probability: P(all 2 fail) = 0.7² = 49% at 30% compilation rate vs 0.7⁴ = 24% — still high, but CPPO pruning means only top-2 candidates get full eval, and Nsight structured rewards provide continuous signal even when both candidates compile (no more std=0 dead zones for reward levels between {1,2,3}). 50 steps (not 100) limits exposure. Qwen3-Coder-Next 80B MoE (3B active, FP8) is the primary model — trained on 800K executable tasks with strong CUDA baseline.
+
 ---
 
 ### 6.5 Cross-Component Integration Risks
@@ -1130,18 +1304,22 @@ SHIP (Saturday night):
 
 ### 6.7 Realistic Timeline (with failure buffer)
 
+**Updated per Section 6.0.4 revision:** Three parallel tracks — GRPO with stacked techniques is now viable alongside SkyDiscover and SFT. Priority order reflects stacked implementation sequence.
+
 | Block | Time | Activity | Failure Buffer |
 |-------|------|----------|---------------|
-| **Wed night** | 4 hrs | Downloads + API key setup | Re-download Thu morning if needed |
-| **Thu 9AM-12PM** | 3 hrs | B200 setup + CUDA verify + Gate G-0.2 | 1 hr debug buffer |
-| **Thu 1PM-5PM** | 4 hrs | Implement `compute_reward()`, wire reward pipeline, Gates G-0.3 to G-0.6 | 2 hr buffer — critical coding block |
-| **Thu 6PM-overnight** | 8 hrs | SFT data generation (GLM-5 API), Gate G-0.5 | Can re-run with different API if first fails |
-| **Fri 9AM-5PM** | 8 hrs | Gate G-0.7 (full GRPO step), SkyDiscover minimal setup, `grpo_train.py` entry point | 3 hr buffer for debugging |
-| **Sat 9AM** | 30 min | **Gate G-25**: compilation rate decision | Decision tree already defined above |
-| **Sat 9:30AM-5PM** | 7.5 hrs | GRPO Stage 1->2->3 OR SkyDiscover-only (if GRPO fails gate) | SkyDiscover is the hedge |
+| **Wed night** | 4 hrs | Downloads + API key setup + GLM-5 API registration | Re-download Thu morning if needed |
+| **Thu 9AM-12PM** | 3 hrs | B200 setup + CUDA verify + Gate G-0.2. Load Qwen3-Coder-Next 80B FP8 via Unsloth. | 1 hr debug buffer |
+| **Thu 1PM-11PM** | 8 hrs | **P1 — Core stack:** Hybrid rollout (local nvcc+PAC turns 1-2, Modal+ncu turn 3). Nsight structured reward (`evaluation/reward_nsight.py`). Transformation grammar (`openenv_env/transform_grammar.py`, 12 core rules). SkyDiscover evaluator + 10-iteration hedge run. Gate G-0.3. | 2 hr buffer — critical coding block |
+| **Fri 9AM-1PM** | 4 hrs | **P2 — Training:** SFT on GLM-5 curated data (ConCuR-style). Custom GRPO loop with MARS+TRLOO (`training/custom_grpo_loop.py`). Run 50 steps on 80B FP8. Gate G-0.7. | If GRPO stalls, SFT + SkyDiscover results are the submission |
+| **Fri 1PM-5PM** | 4 hrs | **P3 — Stage 3:** Full GRPO + curriculum on 80B FP8 (40-50 steps). CPPO pruning active. MASPO soft trust if clip issues arise. | If OOM: reduce G=2→1 or switch to SFT-only |
+| **Sat 9AM** | 30 min | **Gate G-25**: compilation rate decision. Evaluate all tracks (SkyDiscover + SFT + GRPO). | Decision tree defined in 6.6 |
+| **Sat 9:30AM-5PM** | 7.5 hrs | Collect best kernels from all tracks. OpenEnv wrapper. Run final eval suite. | SkyDiscover is the hedge |
 | **Sat 5PM-10PM** | 5 hrs | Results collection, demo, blog | 2 hr buffer |
 
 **Total available: ~43 hrs. Total planned: ~36 hrs. Buffer: ~7 hrs (16%).**
+
+**Key change from previous timeline:** All three tracks (SkyDiscover, SFT, GRPO) run in parallel rather than sequentially. GRPO is no longer "lowest probability" — with MARS+TRLOO credit, Nsight rewards, CPPO pruning, and transformation grammar, it is a viable MEDIUM-probability track. Thu night focuses on the core stacked infrastructure (hybrid eval, Nsight reward, transform grammar) that benefits ALL tracks.
 
 ---
 
