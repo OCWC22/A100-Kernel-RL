@@ -562,9 +562,11 @@ TRL's GRPOTrainer expects reward functions with this exact signature:
 
 ```python
 def reward_func(
+    prompts: list[str],           # The prompts
     completions: list[str],       # G completions for current prompt
-    prompts: list[str] = None,    # The prompts (optional)
-    **kwargs                      # Any extra dataset columns
+    completion_ids: list,         # Token IDs of completions
+    trainer_state,                # TRL trainer state
+    **kwargs                      # Extra dataset columns (if remove_unused_columns=False)
 ) -> list[float]:                 # One reward per completion
     """
     Must return a list of floats, same length as completions.
@@ -581,7 +583,8 @@ import tempfile
 import os
 import re
 
-def cuda_kernel_reward(completions: list[str], prompts: list[str] = None, 
+def cuda_kernel_reward(prompts: list[str], completions: list[str],
+                       completion_ids=None, trainer_state=None,
                        task_code: list[str] = None, **kwargs) -> list[float]:
     """
     Evaluate CUDA kernel completions through the KernelForge environment.
@@ -1534,20 +1537,24 @@ config = GRPOConfig(
 
 ### 7.3 The remove_unused_columns Trap
 
-By default, GRPOTrainer removes all dataset columns except 'prompt'. Your reward function needs 'task_code' to know which PyTorch reference to evaluate against. **You MUST set:**
+By default, Trainer removes dataset columns not in the model's forward signature. GRPOTrainer's reward funcs receive `prompts`, `completions`, `completion_ids`, `trainer_state`, plus any extra dataset columns via `**kwargs` — **but only if `remove_unused_columns=False`**. Without this, extra columns like `task_code` are stripped before reaching the reward function. **You MUST set:**
 
 ```python
 config = GRPOConfig(
-    remove_unused_columns=False,  # Keep task_code column
+    remove_unused_columns=False,  # Keep task_code and other extra columns
 )
 ```
 
-And your reward function must accept `**kwargs`:
+And your reward function must accept the full TRL signature:
 
 ```python
-def reward_func(completions, prompts=None, task_code=None, **kwargs):
-    # task_code is available because remove_unused_columns=False
+def reward_func(prompts, completions, completion_ids, trainer_state,
+                task_code=None, **kwargs):
+    # task_code available because remove_unused_columns=False
+    # Belt-and-suspenders: also embed task_code in prompt text
 ```
+
+**Belt-and-suspenders approach:** embed task_code into the `prompt` column text so reward works even if column-stripping behavior changes across TRL versions.
 
 ### 7.4 Group Size and Reward Variance
 

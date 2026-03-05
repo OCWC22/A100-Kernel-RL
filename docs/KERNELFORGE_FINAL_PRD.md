@@ -242,11 +242,12 @@ python -c "import unsloth; print('OK')"
 # Verify reward function signature matches what TRL actually passes.
 # TRL GRPO expects dataset column "prompt" (SINGULAR, not "prompts").
 # Standardize all dataset builders to use "prompt" column.
+# Reward funcs receive: prompts, completions, completion_ids, trainer_state, **kwargs
 python -c "
 from trl import GRPOConfig
-# Verify remove_unused_columns=False is supported
+# Verify remove_unused_columns=False keeps extra columns for reward **kwargs
 config = GRPOConfig(output_dir='/tmp/test', remove_unused_columns=False, report_to='none')
-print('TRL config OK:', config.remove_unused_columns)
+print('TRL config OK, remove_unused_columns:', config.remove_unused_columns)
 "
 ```
 
@@ -769,9 +770,9 @@ THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extra
 
 TRLOO post-process: if Dr. Kernel derivation confirms N/(N-1) scaling, apply to advantages; otherwise run vanilla GRPO first with tight gates.
 
-Key function: `cuda_kernel_reward(completions, **kwargs) -> list[float]`
+Key function: `cuda_kernel_reward(prompts, completions, completion_ids, trainer_state, **kwargs) -> list[float]`
 
-**TRL GRPO ignores extra dataset columns** — only `prompt` reaches `reward_funcs`. Do NOT depend on `task_code` arriving via `**kwargs`. Instead, embed all context (task Python code, metadata, SKILL.md) directly into the `prompt` column text. Dataset must have a `prompt` column (singular, not `prompts`).
+**TRL GRPO reward funcs** receive `prompts`, `completions`, `completion_ids`, `trainer_state`, plus any extra dataset columns via `**kwargs` — but only if `remove_unused_columns=False` in GRPOConfig (default is True, which strips extra columns). For robustness, embed task_code + metadata directly into the `prompt` column text so reward works regardless of column-stripping behavior. Dataset must have a `prompt` column (singular, not `prompts`).
 
 (Full implementation in Engineering PRD v2.)
 
@@ -791,7 +792,7 @@ From CUDA Agent Section 3.2:
 #### Task 7: `data/loader.py` — Dataset Loading
 **Priority:** P0 | **Time:** 45 min | **Depends on:** Nothing
 
-Load Ops-6K. Format prompts with SKILL.md. Filter by stage (warmup=single-op, curriculum=all). **Embed task_code + metadata directly into `prompt` column** (TRL GRPO only passes `prompt` to reward — extra columns are ignored).
+Load Ops-6K. Format prompts with SKILL.md. Filter by stage (warmup=single-op, curriculum=all). **Embed task_code + metadata directly into `prompt` column** for robustness (extra columns reach reward only if `remove_unused_columns=False`). Also set `remove_unused_columns=False` in GRPOConfig as belt-and-suspenders.
 
 Key function: `load_training_dataset(stage: str) -> Dataset`
 
