@@ -316,7 +316,7 @@ That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 
 - Per-turn rewards come from **CUDA-Agent's profiling.py + ncu on Modal** (continuous Nsight signal → no lazy optimization)
 - CPPO cheap filter runs locally before Modal (2-4× eval saving)
-- G=4, max_steps=20 fits in <4 hrs on B200 FP8
+- G=2, max_steps=10 (P3 demo, local-only eval) fits in <1 hr on B200 FP8
 - Multi-turn dataset: each example has turns = [initial kernel, compiler feedback, refined kernel, …] using OpenEnv step()
 
 ### 7. Quick Reference Table (Copy into Your PRD Appendix)
@@ -505,7 +505,7 @@ Model weights (4-bit QLoRA)        ~17.5 GB      35B params × 4 bits / 8
 LoRA adapters (r=16)               ~0.2 GB       Only on attention + MLP projections
 LoRA optimizer (AdamW)             ~0.8 GB       2 states per LoRA param (FP32)
 Gradient checkpointing activations ~4.0 GB       Unsloth's optimized checkpointing
-KV cache (G=4, 4096 tokens each)   ~8.0 GB       4 generations × 4096 × hidden_dim
+KV cache (G=2, 4096 tokens each)   ~4.0 GB       2 generations × 4096 × hidden_dim
 Generation logprobs storage        ~2.0 GB       For policy ratio computation
 Reference logprobs                 ~2.0 GB       LoRA disabled = reference behavior
 ─────────────────────────────────────────────────────────
@@ -592,13 +592,12 @@ def cuda_kernel_reward(completions: list[str], prompts: list[str] = None,
     3. Compile with nvcc -arch=sm_80 in subprocess (crash isolation)
     4. Verify correctness against PyTorch reference
     5. Profile vs torch.compile
-    6. Return discrete reward {-1, 1, 2, 3}
-    
-    CUDA Agent Equation 1 (validated +36.4pp over continuous, Table 2):
-    r = -1  if compilation fails OR correctness fails
-    r = +1  if correct but speedup ≤ 1.05×
-    r = +2  if speedup > 1.05× vs torch.eager
-    r = +3  if speedup > 1.05× vs BOTH torch.eager AND torch.compile
+    6. Return continuous reward: log(speedup) + Nsight bonus
+
+    Reward formula (replaces CUDA Agent's discrete Equation 1):
+    r = -1.0  if compilation fails OR correctness fails
+    r = log(speedup_vs_eager) + 0.4*occupancy + 0.3*mem_coalescing + 0.2*warp_efficiency
+    See openenv_env/reward.py for implementation.
     """
     rewards = []
     
@@ -881,9 +880,9 @@ def run_stage1(model, tokenizer, output_dir: str):
         output_dir=os.path.join(output_dir, "stage1"),
         
         # GRPO-specific
-        num_generations=4,            # G = 4 completions per prompt
-        # This means: for each prompt, generate 4 CUDA kernels,
-        # evaluate all 4, compute group-relative advantages,
+        num_generations=2,            # G = 2 (reduced from 4 — fewer zero-gradient steps)
+        # For each prompt, generate 2 CUDA kernels,
+        # evaluate both, compute group-relative advantages,
         # update policy to favor higher-reward kernels
         
         # Clipping
@@ -1025,13 +1024,13 @@ def run_stage3(model, tokenizer, output_dir: str):
         output_dir=os.path.join(output_dir, "stage3"),
         
         # GRPO
-        num_generations=4,
+        num_generations=2,            # G = 2 (reduced from 4)
         beta=0.0,
         max_grad_norm=1.0,
-        
+
         # Generation — lower temperature for exploitation
         max_completion_length=4096,
-        temperature=1.0,   # Match Qwen3-Coder-Next training temperature
+        temperature=0.7,   # Lower for Stage 3 exploitation
         
         # Training
         per_device_train_batch_size=1,
@@ -1424,9 +1423,9 @@ TOTAL PER STEP (multi-turn, 3T):   ~270-930s    ~4.5-15 minutes
 |-------|-------|-----------|------------|-------------------|
 | Stage 1 (300 steps, 3 turns) | 300 | ~5 min | ~25 hours | 3,600 |
 | Stage 2 (RFT, SFT) | N/A | N/A | ~30 min | 100 |
-| Stage 3 (200 steps, 5 turns) | 200 | ~8 min | ~27 hours | 4,000 |
+| Stage 3 (10 steps, 3 turns, local-only) | 10 | ~3 min | ~30 min | 60 |
 
-**Reality check:** 25 + 27 = 52 hours for full pipeline. That's more than a 48-hour hackathon.
+**Reality check (revised):** Stage 3 is now a P3 optional 10-step demo with local-only nvcc eval. Full pipeline: ~25 hrs (Stage 1) + 30 min (Stage 2) + 30 min (Stage 3) = ~26 hours. But Stage 3 only runs if Gate G-0.8 passes.
 
 ### Hackathon-Adjusted Budget
 
@@ -1590,12 +1589,12 @@ STACKED CONFIGURATION (REVISED — March 5, 2026):
   G = 2 (reduced from 4 — fewer zero-gradient steps)
   Steps = 40-50 per stage (reduced from 80-100)
   Max turns = 3 (reduced from 5 — TRLOO bias compounds with turns)
-  Credit = MARS+TRLOO cumulative per-turn + N/(N-1) post-process (GRPO-4)
-  Reward = log(speedup) + Nsight structured (continuous). TRLOO N/(N-1) on advantages.
+  Credit = MARS+TRLOO cumulative per-turn (GRPO-4, GRPO-9)
+  Reward = Nsight structured (continuous) + discrete milestones (GRPO-9)
   Loss = MASPO soft trust σ=0.2 (GRPO-12) or standard clip
   Pruning = CPPO top-2 of G after cheap filter (GRPO-11)
-  Action space = Free-form + rich SKILL.md context (grammar deferred to v2)
-  Eval = Local nvcc only for P3 (no Modal). Hybrid local+Modal for stretch.
+  Action space = Transformation grammar 12-40 rules (GRPO-13)
+  Eval = Hybrid: local nvcc+PAC turns 1-2, Modal+ncu turn 3 (GRPO-10)
 
 B200 MEMORY:
   Coder-Next 80B FP8: ~100 GB total → 92 GB free (PRIMARY)
@@ -1605,9 +1604,8 @@ B200 MEMORY:
 HACKATHON BUDGET (STACKED):
   Stage 1: 40-50 steps × ~1-2 min = ~1.5 hours (hybrid eval)
   Stage 2: RFT = ~30 min
-  Stage 3: 10 steps × ~1-2 min = ~20 min (P3 optional demo, local-only)
-  Total: ~2.5 hours (with stacked optimizations)
-  Gate G-0.8: 5-step sanity check required before P3
+  Stage 3: 40-50 steps × ~1-2 min = ~1.5 hours (hybrid eval + CPPO)
+  Total: ~3.5 hours (with stacked optimizations)
 
 ABORT CONDITIONS:
   Reward mean stays at -1.0 after 30 steps → model can't compile
@@ -1622,7 +1620,7 @@ ABORT CONDITIONS:
 
 ### The Problem (Section 6.0.2 — Fundamental Failure #2)
 
-Our reward function has discrete levels {-1, 1, 2, 3}. Without profiling, only {-1, 1} are reachable. Even WITH profiling, the 4-level scheme loses critical signal:
+Our **original** reward function had discrete levels {-1, 1, 2, 3}. Without profiling, only {-1, 1} were reachable. Even WITH profiling, the 4-level scheme lost critical signal:
 - A 1.06x kernel (barely r=+2) gets the same reward as a 5x kernel (also r=+2)
 - No incentive to optimize beyond the threshold
 - CUDABench (arXiv 2603.02236): "mismatch between high compilation success and low functional correctness"
@@ -1713,7 +1711,7 @@ def trloo_post_process(advantages: list[float], n: int) -> list[float]:
 
 ### The Problem (Section 6.1, Risk 1.2)
 
-Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. 100 steps = 8+ hours.
+Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. Stage 3 uses local-only eval (10 steps), but Stages 1-2 still need Modal for full profiling.
 
 ### The Fix: Local Cheap Eval for Early Turns, Modal for Final
 
@@ -1764,7 +1762,7 @@ def _format_feedback(result: dict) -> str:
 
 ### The Problem (Section 6.0.3 — Fundamental Failure #3)
 
-G=4 completions × full Modal eval = expensive. Most completions are garbage (especially early in training). We waste 75% of eval budget on kernels that obviously won't compile.
+G completions × full Modal eval = expensive. Most completions are garbage (especially early in training). With G=4 (original), we waste 75% of eval budget on kernels that obviously won't compile. With G=2 (revised), CPPO still helps by filtering the weaker candidate.
 
 ### The Fix: Cheap Structural Filter + Prune Bottom Completions
 
@@ -1786,7 +1784,7 @@ def cheap_cuda_score(code: str) -> float:
     return score
 ```
 
-**Usage:** Generate G=4 candidates. Score all 4 cheaply. Only eval top-2 on Modal. Assign r=-1 to pruned candidates (they didn't even pass the structural filter).
+**Usage:** Generate G candidates. Score all cheaply. Only eval top candidates on Modal. Assign r=-1 to pruned candidates (they didn't even pass the structural filter). With G=2, prune the weaker one if its score is below threshold.
 
 **Impact:**
 - 2-4x fewer Modal calls per step
@@ -1838,7 +1836,7 @@ def maspo_policy_loss(log_probs, old_log_probs, advantages, sigma=0.2):
 - At ratio=1.5: gate=0.11 (strong dampening for large changes)
 - Smooth gradients everywhere → better exploration on sparse rewards
 
-**Impact:** +2-3% over GRPO on coding/math (MASPO paper ablations). Less collapse on rare high-reward optimizations — critical for our sparse {-1, 1, 2, 3} reward landscape.
+**Impact:** +2-3% over GRPO on coding/math (MASPO paper ablations). Less collapse on rare high-reward optimizations — critical for continuous reward with sparse high-speedup events.
 
 **Integration:** Monkey-patch `GRPOTrainer.compute_loss()` in `training/stage3_grpo.py`, or create `training/maspo_loss.py` as a standalone module. If TRL's API is too opaque for monkey-patching, use standard clip (this is a nice-to-have, not critical).
 
