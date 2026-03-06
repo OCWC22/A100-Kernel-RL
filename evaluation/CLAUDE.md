@@ -20,7 +20,7 @@ Constants: `MODAL_APP_NAME="kernelforge-a100"`, `TARGET_GPU="A100"`, `EVAL_PROBL
 Stages evaluated:
 | Label | Path |
 |-------|------|
-| Base | Qwen/Qwen2.5-Coder-7B-Instruct |
+| Base | Qwen/Qwen3.5-35B-A3B |
 | Stage 1 (GRPO warm-up) | outputs/kernelforge-stage1 |
 | Stage 2 (RFT) | outputs/kernelforge-stage2 |
 | Stage 3 (GRPO+curriculum) | outputs/kernelforge-stage3 |
@@ -105,7 +105,7 @@ Returns: `compiles`, `correct`, `speedup_vs_orig`, `speedup_vs_dg`, `runtime_ms`
 
 ## modal_train.py (project root) — NEW
 
-Modal training app. Runs 3-stage pipeline on B200 ($6.25/hr, 192GB).
+Modal training app. Runs 3-stage pipeline on H100 ($3.95/hr, 80GB).
 - `modal run modal_train.py --stage 0` — smoke test
 - `modal run modal_train.py --stage 1 --max-steps 10` — Stage 1 warmup
 - `modal run modal_train.py --stage 3` — Stage 3 GRPO demo

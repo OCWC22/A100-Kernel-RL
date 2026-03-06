@@ -2,27 +2,27 @@
 
 ## GPU Split
 
-> **B200** = model weights + generation + gradient updates + local nvcc compile checks (fast-fail).
+> **H100** ($3.95/hr) = model weights + generation + gradient updates + local nvcc compile checks (fast-fail).
 > **A100 (Modal)** = all performance reward (speedup timing, execution-based correctness, Nsight profiling).
-> B200 timing ≠ A100 timing. Never use B200 execution for performance reward.
+> H100 timing ≠ A100 timing. Never use H100 execution for performance reward.
 
 ## Model
 
-- **Primary**: Qwen/Qwen3-Coder-Next (80B MoE, 3B active, FP8 on B200 192GB)
-- **Fallback**: Qwen/Qwen2.5-Coder-7B-Instruct
+- **Primary**: Qwen/Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active, 4-bit on H100 80GB)
+- **Fallback**: Qwen/Qwen3.5-35B-A3B
 - **Env vars**: `PRIMARY_MODEL`, `FALLBACK_MODEL` in `model_loader.py`
-- **Note**: `model_loader.py` currently uses NF4 4-bit via bitsandbytes (works on any GPU). Switch to FP8 for B200.
+- **Note**: `model_loader.py` uses NF4 4-bit via bitsandbytes (works on any GPU). FP8 for future B200 scale-up.
 
 ## Stage Configs
 
 | Param | Stage 1 (`stage1_warmup.py`) | Stage 2 (`stage2_rft.py`) | Stage 3 (`stage3_grpo.py`) |
 |-------|------------------------------|---------------------------|----------------------------|
 | **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum **(optimized per GRPO-15)** |
-| **LR** | 3e-6 | 5e-6 | 5e-6 |
-| **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
+| **LR** | 2e-6 | 5e-6 | 3e-6 |
+| **Temperature** | 1.0 | 0.7 (generation) | 0.7 |
 | **G (generations)** | 2 | — | 2 |
-| **Max turns** | 5 | — | **20** (full compile→correct→optimize→tune lifecycle) |
-| **Steps/Epochs** | 300 steps | 3 epochs | **150 steps** (matches CUDA-Agent's 150 on 1 GPU) |
+| **Max turns** | 3 | — | **3-5** (hackathon pilot; 20 is future target) |
+| **Steps/Epochs** | 100 steps | 3 epochs | **50 steps** (hackathon pilot; 150 is future target) |
 | **Batch** | 1 × 4 grad_accum | 1 × 4 grad_accum | 1 × 4 grad_accum |
 | **Optimizer** | paged_adamw_8bit | — | paged_adamw_8bit |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
@@ -63,10 +63,10 @@
 
 ### `make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable`
 Returns TRL-compatible `rollout_func(prompt_ids, ...) -> dict` with keys:
-`prompt_ids`, `completion_ids`, `logprobs`, `env_reward`. Stage 3 uses `max_turns=10` per GRPO-15 optimized config.
+`prompt_ids`, `completion_ids`, `logprobs`, `env_reward`. Stage 3 uses `max_turns=3-5` per GRPO-15.1 hackathon config.
 
 ### Flow per completion:
-1. Generate response on B200 → `extract_cuda_code(text)` extracts ```cuda blocks
+1. Generate response on H100 → `extract_cuda_code(text)` extracts ```cuda blocks
 2. **`_local_compile_check(code)`** — nvcc -arch=sm_80 -c syntax check (**IMPLEMENTED**, saves ~50% Modal cost)
 3. If compiles locally → `_evaluate_on_modal(code, task_code)` — **A100 execution:** routes to `evaluate_ops6k_kernel` (Ops-6K) or `evaluate_kernel` (WCC)
 4. `_compute_reward_from_result(result)` → log(speedup) + optional Nsight bonus
@@ -86,7 +86,7 @@ Single-turn wrapper — extracts env_reward from rollout kwargs.
 
 ## TRLOO Custom Trainer (`custom_grpo_trainer.py`) — IMPLEMENTED
 
-`TRLOOGRPOTrainer(GRPOTrainer)` — drop-in replacement for TRL's GRPOTrainer. Overrides `_compute_advantages()` to apply N/(N-1) scaling after parent computes vanilla GRPO advantages. Fixes 25% gradient shrinkage (Dr. Kernel, arXiv 2602.05885).
+`TRLOOGRPOTrainer(GRPOTrainer)` — drop-in replacement for TRL's GRPOTrainer. Overrides `_compute_advantages()` to apply N/(N-1) scaling after parent computes vanilla GRPO advantages. Fixes 50% gradient shrinkage at G=2 (Dr. Kernel, arXiv 2602.05885).
 
 Also provides factory: `create_trloo_trainer(model, tokenizer, reward_funcs, train_dataset, config, rollout_func)`.
 
@@ -154,9 +154,9 @@ Implements SkyDiscover's algorithms natively (no external dependency).
 | Evaluator bridge (cascade eval) | **DONE** | `skydiscover_integration/evaluator.py` |
 | AdaEvolve multi-island search | **DONE** | `skydiscover_integration/adaevolve.py` |
 | EvoX self-evolving strategies | **DONE** | `skydiscover_integration/evox_strategies.py` |
-| MARS return-to-go credit | NOT YET | `custom_grpo_loop.py` (GRPO-4 line 1171) |
-| CPPO completion pruning | NOT YET | (in custom_grpo_loop.py) (GRPO-11 line 1762) |
-| MASPO soft trust region | NOT YET | `maspo_loss.py` (GRPO-12 line 1805) |
+| MARS return-to-go credit | NOT YET (hackathon stretch goal) | `custom_grpo_loop.py` (GRPO-4) |
+| CPPO completion pruning | NOT YET (hackathon stretch goal) | (in custom_grpo_loop.py) (GRPO-11) |
+| MASPO soft trust region | NOT YET (future) | `maspo_loss.py` (GRPO-12) |
 | ~~Transformation grammar~~ | DEFERRED | v2 (GRPO-13 line 1849) |
 
 ## Files to Create

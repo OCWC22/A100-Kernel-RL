@@ -8,7 +8,7 @@
 ![PyTorch](https://img.shields.io/badge/PyTorch-2.10-orange?style=for-the-badge&logo=pytorch)
 
 **Autonomous Hardware-Aware GPU Performance Engineering**
-**Train on B200 | Evaluate on A100 | Target sm_80**
+**Train on H100 | Evaluate on A100 | Target sm_80**
 
 [OpenEnv Hackathon SF • March 7-8, 2026](https://shack15.com) • [Live Demo](#demo) • [Paper](#documentation)
 
@@ -23,8 +23,8 @@ KernelForge-OpenEnv establishes a framework for **Artificial Expert Intelligence
 - **Hardware**: NVIDIA A100 (`sm_80`) by default (configurable)
 - **Speedup**: derived from live `profile_baselines` + `evaluate_kernel` outputs
 - **Correctness**: PAC-reasoning mathematical verification
-- **Training**: 3-stage RL pipeline on B200 ($6.25/hr), all performance reward on A100 (Modal)
-- **Model**: Qwen3-Coder-Next (80B/3B MoE)
+- **Training**: 3-stage RL pipeline on H100 ($3.95/hr), all performance reward on A100 (Modal)
+- **Model**: Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active)
 
 ## 🏗️ Architecture
 
@@ -32,7 +32,7 @@ KernelForge-OpenEnv establishes a framework for **Artificial Expert Intelligence
 KernelForge-OpenEnv/
 ├── skill_a100.md                        # Agent prompt & optimization rules (default)
 ├── modal_app.py                         # A100 eval: evaluate_kernel + evaluate_ops6k_kernel
-├── modal_train.py                       # Modal training: stages 1-3 on B200
+├── modal_train.py                       # Modal training: stages 1-3 on H100
 ├── openenv_env/                         # OpenEnv environment + reward + anti-hack
 │   └── skill_builder.py                 # Dynamic SKILL.md + real A100 expert patterns
 ├── training/                            # 3-stage RL: GRPO warmup + RFT + TRLOO-GRPO
@@ -43,7 +43,7 @@ KernelForge-OpenEnv/
 │   └── curriculum.py                    # 4-phase curriculum with topology-aware graph tasks
 ├── datasets/                            # Training datasets
 │   ├── build_combined_dataset.py        # Unified builder: manifest + Ops-6K → combined JSONL
-│   ├── combined_kernelforge.jsonl       # 192 rows (doubleGraph; ~6,192 after Ops-6K merge on B200)
+│   ├── combined_kernelforge.jsonl       # 192 rows (doubleGraph; ~6,192 after Ops-6K merge)
 │   ├── extract_doublegraph_a100.py      # Harvester + shared constants
 │   ├── doublegraph_sft.jsonl            # SFT format (HF messages) for Stage 2
 │   └── integrity.py                     # Dataset validation (3 checks)
@@ -73,9 +73,9 @@ Mathematically-proven safe non-atomic Union-Find operations that eliminate seria
 System 3 reasoning with Input Generator (adversarial graphs) and Algorithmic Verifier (mathematical invariants) providing empirical correctness guarantees.
 
 ### 4. **3-Stage RL Training Pipeline**
-- **Stage 1**: GRPO warm-up (LR=3e-6, T=0.9, 300 steps, easy subset)
+- **Stage 1**: GRPO warm-up (LR=3e-6, T=0.9, 100 steps, easy subset)
 - **Stage 2**: Rejection Fine-Tuning (reward >= 0.0, SFT 3 epochs)
-- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, **150 steps, 20 turns, 32K context**, B200 gen + A100 eval)
+- **Stage 3**: TRLOO-augmented GRPO + curriculum (LR=5e-6, T=0.7, G=2, **50 steps (hackathon pilot), 3-5 turns, 8192 context**, H100 gen + A100 eval)
 
 ## 🚀 Quick Start
 
@@ -111,16 +111,16 @@ uv run streamlit run demo/streamlit_demo.py
 # Deploy Modal eval endpoint (A100)
 modal deploy modal_app.py
 
-# Smoke test on Modal B200 (model load + dataset + generation + eval)
+# Smoke test on Modal H100 (model load + dataset + generation + eval)
 modal run modal_train.py --stage 0
 
-# Stage 1: GRPO warmup (300 steps on B200)
+# Stage 1: GRPO warmup (100 steps on H100)
 modal run modal_train.py --stage 1
 
 # Stage 1: Quick test (10 steps only)
 modal run modal_train.py --stage 1 --max-steps 10
 
-# Stage 3: TRLOO-GRPO (150 steps, 20 turns, requires Stage 2 checkpoint)
+# Stage 3: TRLOO-GRPO (50 steps, 3-5 turns, requires Stage 2 checkpoint)
 modal run modal_train.py --stage 3
 ```
 
@@ -137,9 +137,9 @@ Use `profile_baselines` + `evaluate_kernel` outputs as the source of truth for s
 
 ### Model Configuration
 ```python
-# Qwen3-Coder-Next (80B total / 3B active MoE)
+# Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active)
 model, tokenizer = FastModel.from_pretrained(
-    model_name="Qwen/Qwen3-Coder-Next",
+    model_name="Qwen/Qwen3-Coder-30B-A3B-Instruct",
     max_seq_length=8192,
     load_in_4bit=True,  # QLoRA for hackathon VRAM
 )
@@ -280,11 +280,11 @@ for (int k = 0; k < TILE_SIZE; k++) {
 
 ## Training Commands
 
-All training runs on B200 ($6.25/hr on Modal, 192GB). Eval runs on A100 via Modal.
+All training runs on H100 ($3.95/hr on Modal, 80GB). Eval runs on A100 via Modal.
 
 ### Stage 1: GRPO Warm-up (TRLOOGRPOTrainer)
 ```bash
-modal run modal_train.py --stage 1            # Full 300 steps
+modal run modal_train.py --stage 1            # Full 100 steps
 modal run modal_train.py --stage 1 --max-steps 10  # Quick test
 ```
 

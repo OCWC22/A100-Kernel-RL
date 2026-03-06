@@ -7,8 +7,8 @@ Per-second billing, no minimum. $30/month free credits on Starter plan.
 | GPU | VRAM | Arch | $/second | $/hour | Use Case |
 |-----|------|------|----------|--------|----------|
 | H200 | 141 GB HBM3e | sm_90 | $0.001261 | $4.54 | Training (alternative — fits but tight, ~41GB free) |
-| **B200** | 192 GB HBM3e | sm_100 | $0.001736 | **$6.25** | **Training** (primary — FP8, 80B fits with ~92GB free) |
-| H100 | 80 GB HBM3 | sm_90a | $0.001097 | $3.95 | ❌ Cannot fit 80B FP8 (~100GB > 80GB VRAM) |
+| B200 | 192 GB HBM3e | sm_100 | $0.001736 | $6.25 | Future scale-up (Qwen3-Coder-Next 80B FP8) |
+| **H100** | 80 GB HBM3 | sm_90a | $0.001097 | **$3.95** | **Training** (primary — Qwen3-Coder-30B-A3B-Instruct fits with ~46-50GB free) |
 | RTX PRO 6000 | 48 GB GDDR7 | ada | $0.000842 | $3.03 | Inference |
 | **A100 80GB** | 80 GB HBM2e | sm_80 | $0.000694 | **$2.50** | **Eval/reward** (target GPU) |
 | A100 40GB | 40 GB HBM2e | sm_80 | $0.000583 | $2.10 | Eval (budget) |
@@ -17,21 +17,21 @@ Per-second billing, no minimum. $30/month free credits on Starter plan.
 | L4 | 24 GB GDDR6 | ada | $0.000222 | $0.80 | Light inference |
 | T4 | 16 GB GDDR6 | sm_75 | $0.000164 | $0.59 | Cheapest |
 
-### KernelForge Cost Estimate (Match Config)
+### KernelForge Cost Estimate (Hackathon Config)
 
 | Component | GPU | Hours | $/hr | Cost |
 |-----------|-----|-------|------|------|
-| Stage 1 warmup (300 steps, 5 turns) | B200 | 3.5 | $6.25 | $21.88 |
-| Stage 2 RFT | B200 | 0.5 | $6.25 | $3.13 |
-| Stage 3 GRPO (150 steps, 20 turns) | B200 | 10.0 | $6.25 | $62.50 |
-| Eval calls (~1,200 calls) | A100 80GB | 10.0 | $2.50 | $25.00 |
-| Best-of-8 inference + SkyDiscover | A100 80GB | 7.2 | $2.50 | $18.00 |
-| Testing/debugging | B200 | 4.0 | $6.25 | $25.00 |
-| **Total** | | **~35** | | **$155.51** |
-| **After $30 free credit** | | | | **$125.51** |
-| **vs CUDA-Agent (128× H20)** | | | | **~$5,000-10,000+** |
+| SFT warmup | H100 | 2.0 | $3.95 | $7.90 |
+| Stage 1 warmup (100 steps) | H100 | 3.5 | $3.95 | $13.83 |
+| Stage 2 RFT | H100 | 0.5 | $3.95 | $1.98 |
+| Stage 3 GRPO pilot (50 steps) | H100 | 2.0 | $3.95 | $7.90 |
+| Eval calls (~400 calls) | A100 80GB | 4.0 | $2.50 | $10.00 |
+| Search / best-of-N + SkyDiscover | A100 80GB | 3.0 | $2.50 | $7.50 |
+| Testing/debugging | H100 | 3.0 | $3.95 | $11.85 |
+| **Total** | | **~18** | | **~$61-100** |
+| **Budget ceiling** | | | | **$200** |
 
-Source: [modal.com/pricing](https://modal.com/pricing), [B200 pricing blog](https://modal.com/blog/nvidia-b200-pricing)
+Source: [modal.com/pricing](https://modal.com/pricing)
 
 ---
 
@@ -39,81 +39,74 @@ Source: [modal.com/pricing](https://modal.com/pricing), [B200 pricing blog](http
 
 | File | Lines | Size | Content |
 |------|-------|------|---------|
-| `KERNELFORGE_FINAL_PRD.md` | ~1,560 | ~86KB | Single source of truth — replaces all previous docs (Section 7 added: feasibility assessment) |
-| `GRPO_DEEP_DIVE.md` | ~2,175 | ~86KB | Algorithm math, memory budgets, stacked mitigations (GRPO-15 added: optimized config) |
+| `KERNELFORGE_FINAL_PRD.md` | ~1,700 | ~90KB | Hackathon PRD — single source of truth (hackathon-first framing, H100+A100, Qwen3-Coder-30B-A3B-Instruct) |
+| `GRPO_DEEP_DIVE.md` | ~2,400 | ~95KB | Algorithm math, memory budgets, hackathon config (GRPO-15 split: hackathon + future scale-up) |
 
 ## PRD Section Map (`KERNELFORGE_FINAL_PRD.md`)
 
-| Section | Line | Title |
-|---------|------|-------|
-| 0 | 10 | Locked Decisions |
-| 1 | 27 | What We're Building |
-| 2 | 76 | Repository Structure |
-| 3 | 148 | Complete Task List (Phases 0-3) |
-| 4 | 1075 | Critical Path |
-| 5 | 1103 | All Links |
-| 6 | 1181 | Risk Matrix & Mitigations |
-| 6.0 | 1200 | Fundamental Research Risks |
-| 6.1 | 1349 | CUDA Agent Evaluation Pipeline Failures |
-| 6.2 | 1361 | doubleGraph Expert Baselines Failures |
-| 6.3 | 1373 | SkyDiscover Evolutionary Search Failures |
-| 6.4 | 1385 | GRPO Training Failures |
-| 6.5 | 1399 | Cross-Component Integration Risks |
-| 6.6 | 1410 | Decision Gates (Go/No-Go) |
-| 6.7 | 1425 | Realistic Timeline (with failure buffer) |
-| 6.8 | 1447 | Minimum Viable Submission |
-| **7** | **~1512** | **Feasibility Assessment: Matching CUDA-Agent on Single B200** |
-| 7.1 | ~1516 | CUDA-Agent Benchmark (The Target) |
-| 7.2 | ~1528 | CUDA-Agent Ablation (What Drives Performance) |
-| 7.3 | ~1540 | KernelForge vs CUDA-Agent Comparison |
-| 7.4 | ~1562 | Per-Metric Assessment (Training + Inference tiers) |
-| 7.5 | ~1600 | Match Configuration: Full Stack on Single B200 |
-| 7.6 | ~1675 | Expected Results (Match Configuration) |
-| 7.7 | ~1690 | Smaller Models Analysis |
-| 7.8 | ~1700 | Data Efficiency: Why 6,000 Samples Match 153,600 |
-| 7.9 | ~1740 | Bottom Line |
-| 7.10 | ~1755 | MARS+TRLOO+CPPO for CUDA Kernel Generation |
+| Section | Title |
+|---------|-------|
+| 0 | Executive Summary + RL Feasibility + Locked Decisions |
+| 1 | Strategic Framing (hackathon-first + long-term + what we're NOT claiming) |
+| 2 | What We're Building (2.1 Hackathon Deliverable, 2.2 Long-Term Research Platform) |
+| 3 | Scope Boundaries (hackathon scope + explicitly out of scope) |
+| 4 | Training Strategy (Phase 0-3: env validation → SFT → GRPO pilot → search hedge) |
+| 5 | Hackathon Configuration (model, hardware, RL posture, abort conditions) |
+| 6 | Compute Budget (<$200) |
+| 7 | Claim Discipline (Implemented / Tested / Benchmarked / Projected) |
+| 8 | Repository Structure |
+| 9 | Complete Task List (Phases 0-3) |
+| 10 | Critical Path |
+| 11 | All Links |
+| 12 | Risk Matrix & Mitigations |
+| 12.0-12.8 | Risk categories + Decision Gates + Timeline + Min Viable Submission |
+| 12.9 | Deliverables for Judges |
+| 12.10 | Bottom Line |
+| 13 | Future Work: Scale-Up Feasibility Assessment (B200/Coder-Next — speculative) |
 
 ## GRPO Deep Dive Section Map (`GRPO_DEEP_DIVE.md`)
 
-| Section | Line | Title |
-|---------|------|-------|
-| GRPO-1 | 335 | The Algorithm (Full Math) |
-| GRPO-2 | 495 | B200 192GB Memory Budget (Exact) |
-| GRPO-3 | 557 | TRL GRPOTrainer — Exact Configuration |
-| GRPO-4 | 1171 | MARS+TRLOO Credit Assignment (Multi-Turn) |
-| GRPO-5 | 1401 | Compute Budget on B200 |
-| GRPO-6 | 1446 | What To Monitor During Training |
-| GRPO-7 | 1504 | Critical Implementation Notes |
-| GRPO-8 | 1573 | Quick Reference Card |
-| GRPO-9 | 1623 | Nsight Compute Structured Rewards |
-| GRPO-10 | 1714 | Hybrid Eval (Local + Modal) |
-| GRPO-11 | 1762 | CPPO Completion Pruning |
-| GRPO-12 | 1805 | MASPO Soft Trust Region |
-| GRPO-13 | 1849 | Transformation Grammar (40 Rules) — DEFERRED TO v2 |
-| GRPO-14 | 1978 | Full Stacked Architecture (Single-GPU Hackathon) |
-| **GRPO-15** | **~2104** | **Optimized Single-B200 Config (Matching CUDA-Agent)** |
+| Section | Title |
+|---------|-------|
+| Top | Core Recommendation (hackathon path + what we need to prove) |
+| GRPO-1 | The Algorithm (Full Math) |
+| GRPO-2 | Memory Budget (H100 primary, B200 future) |
+| GRPO-3 | TRL GRPOTrainer — Exact Configuration |
+| GRPO-4 | MARS+TRLOO Credit Assignment (Multi-Turn) — MARS is NOT YET |
+| GRPO-5 | Compute Budget (Hackathon: H100 + A100) |
+| GRPO-6 | What To Monitor During Training |
+| GRPO-7 | Critical Implementation Notes |
+| GRPO-8 | Quick Reference Card (hackathon config) |
+| GRPO-9 | Nsight Compute Structured Rewards |
+| GRPO-10 | Hybrid Eval (Local + Modal) |
+| GRPO-11 | CPPO Completion Pruning — NOT YET (stretch goal) |
+| GRPO-12 | MASPO Soft Trust Region — NOT YET (future) |
+| GRPO-13 | Transformation Grammar (40 Rules) — DEFERRED TO v2 |
+| GRPO-14 | Full Stacked Architecture (future targets, not hackathon claims) |
+| GRPO-15 | Hackathon Config (15.1) + Future Scale-Up Target (15.2) |
+| GRPO-16 | Presentation Framing |
+| GRPO-17 | Abort Gates (Consolidated) |
 
 ---
 
 ## training/ — 3-Stage RL Pipeline
 
-**Model**: Qwen/Qwen3-Coder-Next (80B MoE, 3B active, FP8 on B200 192GB), fallback Qwen/Qwen2.5-Coder-7B-Instruct
+**Model**: Qwen/Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active, 4-bit on H100 80GB), fallback Qwen/Qwen3.5-35B-A3B
 
-> **GPU Split:** **B200** ($6.25/hr) = model weights + generation + gradient updates + local compile checks. H100 (80GB) cannot fit the model. **A100 (Modal) = all performance reward** (speedup timing, execution correctness, Nsight profiling). B200 timing ≠ A100 timing.
+> **GPU Split:** **H100** ($3.95/hr) = model weights + generation + gradient updates + local compile checks. **A100 (Modal) = all performance reward** (speedup timing, execution correctness, Nsight profiling). H100 timing ≠ A100 timing.
 
 ### Stage Configs
 
 | Param | Stage 1 (`stage1_warmup.py`) | Stage 2 (`stage2_rft.py`) | Stage 3 (`stage3_grpo.py`) |
 |-------|------------------------------|---------------------------|----------------------------|
-| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO + curriculum **(optimized per GRPO-15)** |
+| **Type** | GRPO warm-up | RFT (SFT on filtered) | TRLOO-augmented GRPO pilot **(hackathon config per GRPO-15.1)** |
 | **Trainer** | `TRLOOGRPOTrainer` | SFTTrainer | `TRLOOGRPOTrainer` |
-| **LR** | 3e-6 | 5e-6 | 5e-6 |
-| **Temperature** | 0.9 | 0.7 (generation) | 0.7 |
+| **LR** | 2e-6 | 5e-6 | 3e-6 |
+| **Temperature** | 1.0 | 0.7 (generation) | 0.7 |
 | **G (generations)** | 2 | — | 2 |
-| **Max turns** | 5 | — | **20** (full compile→correct→optimize→tune lifecycle) |
-| **Steps/Epochs** | 300 steps | 3 epochs | **150 steps** (matches CUDA-Agent's 150 on 1 GPU) |
-| **Context** | 8,192 | — | **32,768** (20 turns × ~1.5K/turn; B200 92GB-40GB=52GB free) |
+| **Max turns** | 3 | — | **3-5** (hackathon pilot; 20 is future target) |
+| **Steps/Epochs** | 100 steps | 3 epochs | **50 steps** (hackathon pilot; 150 is future target) |
+| **Context** | 8,192 | — | **8,192** (short context, budget-gated) |
 | **Batch** | 1 x 4 grad_accum | 1 x 4 grad_accum | 1 x 4 grad_accum |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
 
@@ -121,7 +114,7 @@ Shared: bf16=True, max_prompt=512, top_k=50, top_p=0.95, rep_penalty=1.05, vllm 
 
 ### TRLOO Custom Trainer (`custom_grpo_trainer.py`) — IMPLEMENTED
 
-`TRLOOGRPOTrainer(GRPOTrainer)` — drop-in replacement that applies N/(N-1) TRLOO advantage scaling after parent computes vanilla GRPO advantages. Fixes the 25% gradient shrinkage from Dr. Kernel (arXiv 2602.05885). Used by both Stage 1 and Stage 3.
+`TRLOOGRPOTrainer(GRPOTrainer)` — drop-in replacement that applies N/(N-1) TRLOO advantage scaling after parent computes vanilla GRPO advantages. Fixes the 50% gradient shrinkage at G=2 from Dr. Kernel (arXiv 2602.05885). Used by both Stage 1 and Stage 3.
 
 ### LoRA (`model_loader.py`)
 
@@ -140,7 +133,7 @@ Window=10, promote >50%, demote <20%. Phase 2-3 include topology-aware graph pro
 
 ### Multi-Turn Rollout (`multi_turn_rollout.py`)
 
-`make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. Stage 3 uses `max_turns=10` per GRPO-15 optimized config.
+`make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. Stage 3 hackathon uses `max_turns=3-5` per GRPO-15.1.
 
 Flow: generate → `extract_cuda_code()` → `_local_compile_check()` (nvcc syntax, **IMPLEMENTED**) → `_evaluate_on_modal()` (supports both WCC via `evaluate_kernel` and Ops-6K via `evaluate_ops6k_kernel`) → `_compute_reward_from_result()` → `_format_feedback()`. Early exit at reward>=1.6 (log(5.0), i.e. 5x+ speedup).
 
@@ -225,7 +218,7 @@ Launch: `./skydiscover_integration/run_evolution.sh` (uses AdaEvolve, not extern
 
 ### Modal Training (`modal_train.py`, project root) — IMPLEMENTED
 
-Runs stages on Modal cloud GPU. Default: B200 ($6.25/hr, 192GB). Image: CUDA 12.4 + torch + trl[vllm]==0.29.0 + transformers + peft + flash-attn.
+Runs stages on Modal cloud GPU. Default: H100 ($3.95/hr, 80GB). Image: CUDA 12.4 + torch + trl[vllm]==0.29.0 + transformers + peft + flash-attn.
 
 - `modal run modal_train.py --stage 0` — smoke test (model load, dataset, generation, eval endpoint)
 - `modal run modal_train.py --stage 1 --max-steps 10` — Stage 1 warmup
@@ -247,9 +240,9 @@ Runs stages on Modal cloud GPU. Default: B200 ($6.25/hr, 192GB). Image: CUDA 12.
 | Evaluator bridge (cascade eval) | **DONE** | `skydiscover_integration/evaluator.py` |
 | AdaEvolve multi-island search | **DONE** | `skydiscover_integration/adaevolve.py` (UCB + breakthrough) |
 | EvoX self-evolving strategies | **DONE** | `skydiscover_integration/evox_strategies.py` (LogWindowScorer) |
-| MARS return-to-go credit | NOT YET | `training/custom_grpo_loop.py` (GRPO-4) |
-| CPPO completion pruning | NOT YET | (in custom_grpo_loop.py) (GRPO-11) |
-| MASPO soft trust region | NOT YET | `training/maspo_loss.py` (GRPO-12) |
+| MARS return-to-go credit | NOT YET (hackathon stretch goal) | `training/custom_grpo_loop.py` (GRPO-4) |
+| CPPO completion pruning | NOT YET (hackathon stretch goal) | (in custom_grpo_loop.py) (GRPO-11) |
+| MASPO soft trust region | NOT YET (future) | `training/maspo_loss.py` (GRPO-12) |
 | ~~Transformation grammar~~ | DEFERRED | v2 — use CUDA-Agent SKILL.md instead (GRPO-13) |
 
 ### Abort Conditions
@@ -370,7 +363,7 @@ H1: multi-stage > base. H2: RFT necessary (skip → collapse). H3: SKILL.md > ge
 
 ### modal_train.py (project root) — IMPLEMENTED
 
-Modal training app. Runs 3-stage pipeline on B200 ($6.25/hr, 192GB). Smoke test, dry run, and full training modes.
+Modal training app. Runs 3-stage pipeline on H100 ($3.95/hr, 80GB). Smoke test, dry run, and full training modes.
 
 ### Eval Strategy
 

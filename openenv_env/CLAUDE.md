@@ -2,7 +2,7 @@
 
 ## GPU Split
 
-> All performance reward (speedup, correctness) executes on **A100 via Modal**. **B200** ($6.25/hr) for training + local compile checks only.
+> All performance reward (speedup, correctness) executes on **A100 via Modal**. **H100** ($3.95/hr) for training + local compile checks only.
 > Judges call `step()` first — cache model on startup, warm CUDA context, pre-load tokenizer.
 
 ## OpenEnv Protocol

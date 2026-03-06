@@ -1,14 +1,45 @@
-# GRPO Deep Dive: Exact Implementation for B200 192GB
-## Addendum to KernelForge Unified Spec — Section 9 Expansion
-**Paste after Section 9 or replace it entirely.**
+# KernelForge GRPO Deep Dive
+## Hackathon Path: H100 Training + A100 Evaluation + Qwen3-Coder-30B-A3B-Instruct
+**Purpose:** Explain the RL strategy that actually fits the hackathon.
+**Primary hardware:** H100 for training, A100 80GB for evaluation
+**Primary model:** Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active, 128 experts / 8 active, 256K context)
+**Last Updated:** March 5, 2026
 
-> **WARNING — GRPO Bias in Multi-Turn Kernel Generation (March 2026)**
+> **IMPORTANT — Hackathon-Scoped GRPO Strategy (March 2026)**
 >
-> Dr. Kernel (arXiv [2602.05885](https://arxiv.org/abs/2602.05885), HKUST/TikTok) mathematically proves that GRPO's advantage estimation has a **self-inclusion bias**: computing the group mean/std using the current sample itself shrinks the expected gradient by a factor of `(1 - 1/N)`. With our G=4, gradients are systematically **25% too small**. In multi-turn settings (which this document explicitly uses), the bias compounds across turns as fewer samples survive to later turns, making N smaller and the bias worse.
+> This document is no longer centered on B200 as the default, Qwen3-Coder-Next 80B as the default, or full CUDA-Agent-scale replication as the immediate goal.
 >
-> Dr. Kernel shows GRPO saturates at ~200 steps on KernelBench Level-2, while their TRLOO (Turn-level Reinforce Leave-One-Out) continues improving. Five of six concurrent CUDA kernel RL systems (Feb-Mar 2026) chose algorithms other than GRPO. See **FINAL_PRD Section 6.0** for full competitive landscape analysis.
+> This document is now centered on the actual hackathon path:
+> 1. **Use Qwen3-Coder-30B-A3B-Instruct as the primary model.**
+> 2. **Use H100 for training and A100 80GB for evaluation.**
+> 3. **Use SFT first, then a small-budget GRPO pilot.**
+> 4. **Treat deeper multi-turn / larger-model / B200 work as future scale-up.**
 >
-> **Mitigation (Revised March 5, 2026):** MARS+TRLOO hybrid credit assignment (GRPO-4, GRPO-9) directly addresses this bias by computing per-turn cumulative returns with leave-one-out baselines. Combined with CPPO pruning (GRPO-11), continuous log(speedup) + Nsight rewards (GRPO-9/GRPO-10), and MASPO soft trust region (GRPO-12), GRPO becomes viable for single-GPU hackathon settings with Qwen3-Coder-Next 80B FP8 on B200. Transformation grammar (GRPO-13) deferred to v2. See **GRPO-9 through GRPO-14** for the architecture.
+> The goal this weekend is to prove: the reward is real, correctness is real, timing is real, the model can improve candidates under this loop, and the pipeline is reusable later. Not to claim full CUDA-Agent parity.
+>
+> **Key technique:** TRLOO N/(N-1) correction (Dr. Kernel arXiv [2602.05885](https://arxiv.org/abs/2602.05885)) fixes the self-inclusion bias in GRPO's advantage estimation. With G=2, this corrects 50% gradient shrinkage. Implemented in `custom_grpo_trainer.py`.
+
+## Core Recommendation
+
+### Hackathon recommendation
+- **SFT warmup first**, then GRPO pilot, then search / best-of-N as a hedge
+- Model: Qwen3-Coder-30B-A3B-Instruct on H100
+- Eval: A100 80GB via Modal
+- G=2, short context, continuous reward, execution-based correctness, limited-step run with hard abort gates
+- Because under a hackathon budget, the highest-leverage thing is not elegant RL theory — it is working reward plumbing, working correctness checks, working timing on the actual target hardware, and enough model competence that RL steps are not mostly wasted.
+
+### Not recommended as the primary hackathon path
+- Defaulting to Qwen3-Coder-Next 80B or B200
+- Pretending deep 20-turn RL is the must-win path on day one
+- Presenting partially implemented MARS / MASPO / CPPO ideas as already validated reality
+
+### What we need to prove this weekend
+1. The reward function is real and not easily hacked
+2. The model can improve compile / correctness / timing outcomes
+3. GRPO does not collapse immediately
+4. The pipeline is reusable for bigger future experiments
+
+That is enough for the hackathon. Not full benchmark domination.
 
 ---
 
@@ -16,7 +47,7 @@
 
 This section explains **everything from first principles**, as if you have never seen RL before. No assumptions. Every equation is derived step-by-step with intuition, a simple numerical example, the thought process behind why people invented it, the exact problem it solves (or fails to solve), and how the 2026 papers (real ones like arXiv 2601.08521 "Your Group-Relative Advantage Is Biased" and analogs to Dr. Kernel/TRLOO) fix it.
 
-This is tailored to **your exact use-case**: training Qwen3-Coder-Next on B200 to write A100 CUDA kernels using the CUDA-Agent eval pipeline (compile → verify → Nsight profile). The rewards are sparse (most kernels don't compile or are slow) and multi-turn (generate → compiler error feedback → refine → profile speedup).
+This is tailored to **your exact use-case**: training Qwen3-Coder-30B-A3B-Instruct on H100 to write A100 CUDA kernels using the CUDA-Agent eval pipeline (compile → verify → profile). The rewards are sparse (most kernels don't compile or are slow) and the hackathon path starts with SFT warmup before attempting RL.
 
 ### 1. RL Basics – Why We Even Need "Advantage" (First Principles)
 
@@ -41,13 +72,13 @@ Intuition: "If this kernel got high reward, make the model more likely to output
 ```
 where b is a **baseline** (e.g. average reward for this prompt). Subtracting b centers the signal around zero → lower variance, same expected gradient.
 
-**Problem #2 for LLMs in 2024–2026:** training a separate **value network** V (critic) to predict expected reward for every token is expensive (extra 80B parameters, memory explosion on B200).
+**Problem #2 for LLMs in 2024–2026:** training a separate **value network** V (critic) to predict expected reward for every token is expensive (extra model parameters, memory explosion on single GPU).
 
 ### 2. GRPO Invention (DeepSeekMath 2024, popularized in DeepSeek-R1 2025) – The Thought Process
 
 DeepSeek team asked: "Can we get a good baseline **without** training a critic?"
 
-Answer: For the **same prompt**, sample **G** different completions (G=4–16). Their rewards form a tiny "group distribution".
+Answer: For the **same prompt**, sample **G** different completions (G=2–16). Their rewards form a tiny "group distribution".
 
 **Thought process:**
 - The average reward in this group is a cheap Monte-Carlo estimate of "what the model currently expects for this prompt".
@@ -104,7 +135,7 @@ where S_{-i} = sum of others.
 
 When you take expectation E[A_i^{GRPO} · ∇logπ_i], the self-term (1-1/G) r_i correlates with the action you are updating → the gradient is scaled by exactly **(1 - 1/G)**.
 
-For your G=4: gradients are **only 75% as strong** as they should be.
+With G=2: gradients are **only 50% as strong** as they should be. With G=4: 75%.
 
 In **multi-turn** kernel refinement (turn 1: first kernel, turn 2: fix compile error, turn 3: optimize for Nsight occupancy):
 - Bad kernels die early → fewer valid completions in later turns → G shrinks → bias gets **worse**.
@@ -169,15 +200,22 @@ r = r * (1.0 ** turn)   # simple return-to-go weighting (future turns fully coun
 
 This prevents credit assignment collapse in multi-turn kernel refinement (e.g. "the compile fix in turn 2 enabled the 2.3× speedup in turn 3").
 
-### 6. Full Stacked Picture for KernelForge (Why Your One-Shot PRD Now Works)
+### 6. The Operational Reality
 
-- **Base reward:** Nsight continuous (log(speedup) + occupancy + coalescing) → solves "lazy optimization" (no more discrete bins).
-- **CPPO cheap filter** before Modal → only expensive evals on promising kernels.
-- **TRLOO scaling** → removes 25% bias.
-- **MARS return-to-go** → proper multi-turn credit.
-- **Result:** even with G=4 and only 20 steps on B200, you get real learning signal instead of collapse at step 17.
+The real bottleneck is not just memory — it is **evaluation throughput**: compiling kernels, running correctness checks, timing on A100, doing this enough times that RL sees real signal.
 
-This exact stack is what the Feb–Mar 2026 kernel RL papers converged on after the initial GRPO hype.
+That means:
+- fancy RL without real reward plumbing is useless,
+- search sometimes gives better demo value per dollar than pure RL,
+- SFT-first is the right move.
+
+**Stacked techniques that help (when implemented):**
+- **Base reward:** continuous log(speedup) → solves "lazy optimization" (no more discrete bins).
+- **TRLOO scaling** → removes self-inclusion bias (50% gradient shrinkage at G=2).
+- **MARS return-to-go** → proper multi-turn credit (**planned, not fully wired**).
+- **CPPO cheap filter** before Modal → only expensive evals on promising kernels (**planned, not fully wired**).
+
+**Operational conclusion:** because budget is tight, start with SFT-first + shallow GRPO. Because evaluation is expensive, correctness and reward plumbing matter more than fancy RL theory. Because we target a hackathon, working feedback loops beat elegant but unrun architecture.
 
 ### 7. Quick Reference Table
 
@@ -312,14 +350,13 @@ return unbiased.tolist()
 
 That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 
-### 6. Why This Works on Your Exact Stack (B200 + Modal + CUDA-Agent + doubleGraph patterns)
+### 6. Why This Works for the Hackathon Stack (H100 + Modal A100 + CUDA-Agent)
 
-- Per-turn rewards come from **CUDA-Agent's profiling.py + ncu on Modal** (continuous Nsight signal → no lazy optimization)
-- CPPO cheap filter runs locally before Modal (2-4× eval saving)
-- G=2, 50 steps, 10 turns (per GRPO-15 optimized config, B200 gen + A100 eval) in ~3.3 hrs on B200 FP8
-- Multi-turn dataset: each example has turns = [initial kernel, compiler feedback, refined kernel, …] using OpenEnv step()
-- **Expert demonstrations**: 192 A100 kernels from doubleGraph as SFT data (`doublegraph_sft.jsonl`) + combined RL prompts (`combined_kernelforge.jsonl`) — topology-aware, compilation-flag-aware
-- **Rich SKILL.md**: 178 lines with 7 real A100 patterns from production code via `skill_builder.py:_append_a100_patterns()` (degree-based dispatch, warp hash tables, zero-copy convergence, bitmap frontier, path-halving UF, compilation flag tuning, __launch_bounds__)
+- Rewards come from **CUDA events timing on Modal A100** + execution-based correctness (continuous signal → no lazy optimization)
+- G=2 keeps eval budget low, TRLOO N/(N-1) fixes the bias
+- Hackathon config: Qwen3-Coder-30B-A3B-Instruct on H100 gen + A100 eval
+- **Expert demonstrations**: 192 A100 kernels from doubleGraph as SFT data (`doublegraph_sft.jsonl`) + combined RL prompts (`combined_kernelforge.jsonl`)
+- **Rich SKILL.md**: 178 lines with 7 real A100 patterns from production code via `skill_builder.py:_append_a100_patterns()`
 - **SkyDiscover parallel hedge**: `skydiscover_integration/evaluator.py` bridges evolutionary search to same Modal A100 eval pipeline
 
 ### 7. Quick Reference Table (Copy into Your PRD Appendix)
@@ -331,7 +368,7 @@ That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 | + MARS        | return-to-go G_{i,t} then TRLOO            | None             | Yes                 |
 | + Nsight PR   | log(speedup) + weighted occupancy etc.     | —                | Yes (reward base)   |
 
-**Bottom line:** TRLOO-GRPO is **not** a new algorithm — it is vanilla GRPO with one mathematically proven 1-line correction that removes the exact bias Dr. Kernel identified in Feb 2026. Combined with MARS return-to-go and Nsight continuous rewards, it is the strongest single-GPU kernel RL setup possible for the hackathon.
+**Bottom line:** TRLOO-GRPO is **not** a new algorithm — it is vanilla GRPO with one mathematically proven 1-line correction that removes the exact bias Dr. Kernel identified in Feb 2026. Combined with SFT warmup and continuous rewards, it is a promising hackathon-fit stack for validating real learning signal under budget.
 
 ---
 
@@ -351,7 +388,7 @@ For each prompt q_j in a batch of M prompts, sample G completions from the curre
 {o_{j,1}, o_{j,2}, ..., o_{j,G}} ~ π_θ_old(· | q_j)
 ```
 
-In our case: M = 1 (one prompt per step), G = 4 (four kernel candidates per prompt).
+In our case: M = 1 (one prompt per step), G = 2 (two kernel candidates per prompt for the hackathon pilot).
 
 **Step 2: Reward Computation**
 
@@ -473,7 +510,7 @@ Where β is the KL coefficient. DeepSeek used β = 0.04. CUDA Agent's DAPO varia
 2. DAPO showed KL penalty "not essential" for code tasks
 3. Fewer hyperparameters to tune at a hackathon
 
-### GRPO vs PPO: Memory Comparison on B200
+### GRPO vs PPO: Memory Comparison
 
 ```
 PPO requires 4 models in memory:
@@ -495,12 +532,37 @@ Effective GRPO memory = 1 model + LoRA adapters + optimizer states
 
 ---
 
-## GRPO-2: B200 192GB Memory Budget (Exact)
+## GRPO-2: Memory Budget
 
-### Model: Qwen3.5-35B-A3B (MoE, 3B active per token) — BACKUP SCENARIO
+> **Hackathon primary:** H100 80GB with Qwen3-Coder-30B-A3B-Instruct. The B200 192GB budgets below are preserved for future scale-up reference only.
+
+### Model: Qwen3-Coder-30B-A3B-Instruct (MoE, 3.3B active) — HACKATHON PRIMARY
 
 ```
-B200 Total VRAM: 192 GB
+H100 Total VRAM: 80 GB
+
+COMPONENT                          MEMORY        NOTES
+─────────────────────────────────────────────────────────
+Model weights (FP8 or 4-bit)      ~16-18 GB     30.5B params, MoE, 3.3B active
+LoRA adapters (r=16)               ~0.2 GB       Only on attention + MLP projections
+LoRA optimizer (AdamW 8-bit)       ~1.5 GB       8-bit Adam states for LoRA params only
+Gradient checkpointing activations ~4.0 GB       Unsloth's optimized checkpointing
+KV cache (G=2, 8192 tokens)        ~4-6 GB       2 generations × 8192 × hidden_dim
+Generation logprobs storage        ~2.0 GB       For policy ratio computation
+Reference logprobs                 ~2.0 GB       LoRA disabled = reference behavior
+─────────────────────────────────────────────────────────
+TOTAL MODEL + TRAINING             ~30-34 GB
+─────────────────────────────────────────────────────────
+
+REMAINING FREE                     ~46-50 GB     ← Ample headroom on H100
+```
+
+This is the hackathon default. The model fits comfortably on H100 with substantial margin.
+
+### Model: Qwen3.5-35B-A3B (MoE, 3B active per token) — FALLBACK SCENARIO
+
+```
+H100 Total VRAM: 80 GB
 
 COMPONENT                          MEMORY        NOTES
 ─────────────────────────────────────────────────────────
@@ -515,17 +577,10 @@ Reference logprobs                 ~2.0 GB       LoRA disabled = reference behav
 TOTAL MODEL + TRAINING             ~34.5 GB
 ─────────────────────────────────────────────────────────
 
-CUDA Kernel Evaluation Sandbox:
-  nvcc compilation workspace        ~2 GB
-  Test input tensors (5 inputs)     ~1 GB        Depends on operator
-  Profiling workspace               ~1 GB
-  CachePool (8 entries)             ~2 GB
-─────────────────────────────────────────────────────────
-TOTAL SANDBOX                      ~6 GB
-─────────────────────────────────────────────────────────
-
-REMAINING FREE                     ~151.5 GB     ← MASSIVE headroom
+REMAINING FREE                     ~45.5 GB      ← Comfortable fit on H100
 ```
+
+> **Note:** Eval runs on Modal A100, not co-located. H100 only handles model weights, generation, and gradient updates.
 
 ### Model: Qwen3.5-9B (Dense)
 
@@ -537,10 +592,11 @@ LoRA + optimizer                   ~1.5 GB
 Activations + KV cache             ~6 GB
 ─────────────────────────────────────────────────────────
 TOTAL                              ~12.5 GB
-REMAINING                          ~179.5 GB
+REMAINING (H100)                   ~67.5 GB
+REMAINING (B200, future)           ~179.5 GB
 ```
 
-### Model: Qwen3-Coder-Next (80B MoE, 3B active) — PRIMARY MODEL
+### Model: Qwen3-Coder-Next (80B MoE, 3B active) — FUTURE SCALE-UP (NOT hackathon primary)
 
 ```
 COMPONENT                          MEMORY
@@ -550,10 +606,10 @@ LoRA + optimizer                   ~3 GB
 Activations + KV cache             ~12 GB
 ─────────────────────────────────────────────────────────
 TOTAL                              ~100 GB
-REMAINING                          ~92 GB         Still plenty for sandbox
+REMAINING (B200 192GB)             ~92 GB         Requires B200 — does NOT fit on H100
 ```
 
-**Conclusion:** On B200, ANY of these models fit comfortably. Even Qwen3-Coder-Next at FP8 leaves 92GB free. The memory constraint that dominated previous planning is completely gone.
+**Conclusion:** On H100, Qwen3-Coder-30B-A3B-Instruct fits comfortably with ~46-50GB free. Qwen3-Coder-Next 80B requires B200 (future scale-up). The hackathon default is the 30B model on H100.
 
 ---
 
@@ -841,19 +897,19 @@ def prepare_grpo_dataset(stage: str = "warmup") -> Dataset:
 training/run_all_stages.py
 
 Complete 3-stage GRPO pipeline for CUDA kernel optimization.
-Runs on B200 192GB. Targets A100 sm_80 kernels.
+Runs on H100 80GB. Targets A100 sm_80 kernels.
 
 Usage:
     python training/run_all_stages.py \
-        --model unsloth/Qwen3-Coder-Next-FP8-Dynamic \
+        --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
         --output_dir ./checkpoints \
         --stage all
 
 Estimated wall-clock:
-    Stage 1 (warmup):    ~4 hours
+    Stage 1 (warmup):    ~2 hours
     Stage 2 (RFT):       ~30 minutes
-    Stage 3 (curriculum): ~5 hours
-    Total:               ~9.5 hours
+    Stage 3 (pilot):     ~2 hours
+    Total:               ~4.5 hours
 """
 import argparse
 import json
@@ -904,8 +960,8 @@ def run_stage1(model, tokenizer, output_dir: str):
         
         # Generation
         max_completion_length=4096,   # CUDA kernels are 50-300 lines
-        temperature=1.0,              # Qwen3-Coder-Next trained at 1.0 — do not lower
-        # Matches Qwen3-Coder-Next's training temperature. Higher = more diverse = stronger GRPO signal.
+        temperature=1.0,              # High for diverse exploration in warmup
+        # Higher = more diverse = stronger GRPO signal.
         
         # Training
         per_device_train_batch_size=1, # 1 prompt per step
@@ -914,10 +970,10 @@ def run_stage1(model, tokenizer, output_dir: str):
         # Effective batch for gradient = 16 completions
         num_train_epochs=1,
         max_steps=100,                # Stage 1 budget (hackathon-adjusted; full budget=300)
-        learning_rate=2e-6,           # Conservative — preserve Qwen3-Coder-Next capabilities
+        learning_rate=2e-6,           # Conservative — preserve base model capabilities
         
         # Precision
-        bf16=True,                    # BF16 training on B200
+        bf16=True,                    # BF16 training on H100
         
         # Logging
         logging_steps=1,              # Log every step (watch the reward!)
@@ -1121,7 +1177,7 @@ def collect_trajectories(model, tokenizer, dataset, n: int = 100) -> list:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--model", default="unsloth/Qwen3-Coder-Next-FP8-Dynamic")
+    parser.add_argument("--model", default="Qwen/Qwen3-Coder-30B-A3B-Instruct")
     parser.add_argument("--output_dir", default="./checkpoints")
     parser.add_argument("--stage", default="all", 
                         choices=["1", "2", "3", "all"])
@@ -1133,7 +1189,7 @@ def main():
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model,
         max_seq_length=8192,
-        dtype=None,  # Auto-detect (BF16 on B200)
+        dtype=None,  # Auto-detect (BF16 on H100)
         load_in_4bit=args.load_in_4bit,
     )
     
@@ -1251,7 +1307,7 @@ def mars_trloo_advantages(group_rollouts: list[dict], gamma: float = 1.0) -> lis
     3. Advantage A_{i,k} = R_{i,k} - baseline
 
     This fixes GRPO's (1 - 1/N) gradient shrinkage:
-      GRPO:  E[ĝ] = (1 - 1/N) × ∇θJ(θ)     ← 25% too small at G=4
+      GRPO:  E[ĝ] = (1 - 1/N) × ∇θJ(θ)     ← 50% too small at G=2
       TRLOO: E[ĝ] = ∇θJ(θ)                    ← unbiased
 
     Args:
@@ -1379,6 +1435,8 @@ def multi_turn_hybrid_rollout(prompts, trainer):
 
 **Bottom line:** MARS+TRLOO is the single highest-leverage addition after hybrid eval. ~50-line change in `multi_turn_rollout.py`. Makes the reward curve jump in the first 20-30 steps of Stage 3.
 
+> **Hackathon implementation status:** TRLOO advantage scaling is **IMPLEMENTED** in `training/custom_grpo_trainer.py`. MARS return-to-go credit assignment (`training/custom_grpo_loop.py`) is **NOT YET implemented** (~50 LOC). For the hackathon, standard TRLOO is the floor. MARS is a stretch goal. Do not present MARS+TRLOO as a validated pair unless both are wired and tested end-to-end.
+
 ---
 
 ### Gate G-0.8: 5-Step GRPO Sanity Check (Thu Night)
@@ -1405,7 +1463,9 @@ KERNELFORGE_STAGE3_MAX_STEPS=5 KERNELFORGE_STAGE3_LOCAL_ONLY=1 \
 
 ---
 
-## GRPO-5: Compute Budget on B200
+## GRPO-5: Compute Budget (Hackathon: H100 + A100)
+
+> **Hackathon budget target: <$200 total.** H100 at $3.95/hr, A100 80GB at $2.50/hr. See PRD Section 6 for budget breakdown.
 
 ### Time Per GRPO Step
 
@@ -1430,9 +1490,9 @@ TOTAL PER STEP (multi-turn, 3T):   ~270-930s    ~4.5-15 minutes
 |-------|-------|-----------|------------|-------------------|
 | Stage 1 (300 steps, 3 turns) | 300 | ~5 min | ~25 hours | 3,600 |
 | Stage 2 (RFT, SFT) | N/A | N/A | ~30 min | 100 |
-| Stage 3 (10 steps, 3 turns, B200+A100) | 10 | ~3 min | ~30 min | 60 |
+| Stage 3 (pilot, H100+A100) | 50 | ~2 min | ~2 hours | 100 |
 
-**Reality check (revised):** Stage 3 is now a P3 optional 10-step demo (B200 generates, A100 evaluates via Modal). Full pipeline: ~25 hrs (Stage 1) + 30 min (Stage 2) + 30 min (Stage 3) = ~26 hours. But Stage 3 only runs if Gate G-0.8 passes.
+**Reality check (revised):** Stage 3 is a GRPO pilot (H100 generates, A100 evaluates via Modal). Full pipeline: ~2 hrs (Stage 1) + 30 min (Stage 2) + 2 hrs (Stage 3) = ~4.5 hours. Stage 3 only runs if Gate G-0.8 passes.
 
 ### Hackathon-Adjusted Budget
 
@@ -1483,7 +1543,7 @@ After 30 Stage 1 steps:
   reward/mean > -0.5?
     YES → On track. Continue.
     NO  → Model can't compile CUDA. Options:
-          1. Switch to Qwen3-Coder-Next (better at code)
+          1. Switch to fallback model (Qwen3.5-35B-A3B)
           2. Do SFT warmup first (pre-generated CUDA data)
           3. Simplify tasks (try vector_add only)
 
@@ -1587,36 +1647,33 @@ GRPO ALGORITHM SUMMARY:
 4. Loss: min(ratio × Â, clip(ratio, 0.8, 1.2) × Â) - β × KL
 5. Update policy via backprop
 
-ORIGINAL CONFIGURATION:
-  G = 4 (num_generations)
+HACKATHON CONFIGURATION (March 5, 2026):
+  Model = Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active)
+  Train GPU = H100 ($3.95/hr)
+  Eval GPU = A100 80GB ($2.50/hr)
+  G = 2 (num_generations)
   β = 0.0 (no KL penalty, DAPO style)
   ε = 0.2 (clip range)
-  Rewards = continuous log(speedup) + Nsight bonus (replacing discrete {-1, 1, 2, 3})
-  Temperature = 1.0 (Stage 1) → 1.0 (Stage 3)
+  Rewards = continuous log(speedup) + optional Nsight bonus
+  Temperature = 1.0 (Stage 1) → 0.7 (Stage 3)
   Learning rate = 2e-6 (Stage 1) → 3e-6 (Stage 3)
   LoRA rank = 16, target = qkvo + gate/up/down
+  Credit = TRLOO (IMPLEMENTED) + MARS per-turn (stretch goal, NOT YET)
+  Eval = Hybrid: local nvcc+PAC early turns, Modal A100 final turn (GRPO-10)
+  Loss = standard clip (MASPO soft trust is future/optional, GRPO-12)
+  Pruning = CPPO (stretch goal, NOT YET, GRPO-11)
 
-STACKED CONFIGURATION (REVISED — March 5, 2026):
-  G = 2 (reduced from 4 — fewer zero-gradient steps)
-  Steps = 40-50 per stage (reduced from 80-100)
-  Max turns = 3 (reduced from 5 — TRLOO bias compounds with turns)
-  Credit = MARS+TRLOO cumulative per-turn (GRPO-4, GRPO-9)
-  Reward = Nsight structured (continuous) + discrete milestones (GRPO-9)
-  Loss = MASPO soft trust σ=0.2 (GRPO-12) or standard clip
-  Pruning = CPPO top-2 of G after cheap filter (GRPO-11)
-  Action space = Transformation grammar 12-40 rules (GRPO-13)
-  Eval = Hybrid: local nvcc+PAC turns 1-2, Modal+ncu turn 3 (GRPO-10)
+H100 MEMORY:
+  Coder-30B-A3B 4-bit: ~30-34 GB total → ~46-50 GB free (PRIMARY)
+  35B-A3B 4-bit: ~34.5 GB total → ~45.5 GB free (FALLBACK)
+  Coder-Next 80B FP8: ~100 GB → DOES NOT FIT (future B200 only)
 
-B200 MEMORY:
-  Coder-Next 80B FP8: ~100 GB total → 92 GB free (PRIMARY)
-  35B-A3B 4-bit: ~34.5 GB total → 157.5 GB free
-  9B 4-bit: ~12.5 GB total → 179.5 GB free
-
-HACKATHON BUDGET (STACKED):
-  Stage 1: 40-50 steps × ~1-2 min = ~1.5 hours (hybrid eval)
+HACKATHON BUDGET:
+  Stage 1: 100 steps × ~2 min = ~3.5 hours
   Stage 2: RFT = ~30 min
-  Stage 3: 40-50 steps × ~1-2 min = ~1.5 hours (hybrid eval + CPPO)
-  Total: ~3.5 hours (with stacked optimizations)
+  Stage 3: 50 steps × ~2 min = ~2 hours (pilot)
+  Total: ~6 hours training + eval
+  Cost: ~$60-100 (H100 + A100)
 
 ABORT CONDITIONS:
   Reward mean stays at -1.0 after 30 steps → model can't compile
@@ -1722,7 +1779,7 @@ def trloo_post_process(advantages: list[float], n: int) -> list[float]:
 
 ### The Problem (Section 6.1, Risk 1.2)
 
-Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. All stages use Modal A100 for correctness+timing; B200 handles local compile pre-checks only.
+Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. All stages use Modal A100 for correctness+timing; H100 handles local compile pre-checks only.
 
 ### The Fix: Local Cheap Eval for Early Turns, Modal for Final
 
@@ -1773,7 +1830,9 @@ def _format_feedback(result: dict) -> str:
 
 ### The Problem (Section 6.0.3 — Fundamental Failure #3)
 
-G completions × full Modal eval = expensive. Most completions are garbage (especially early in training). With G=4 (original), we waste 75% of eval budget on kernels that obviously won't compile. With G=2 (revised), CPPO still helps by filtering the weaker candidate.
+G completions × full Modal eval = expensive. Most completions are garbage (especially early in training). With G=4 (original design), we wasted 75% of eval budget on kernels that obviously won't compile. With G=2 (current), CPPO still helps by filtering the weaker candidate.
+
+> **Hackathon status:** CPPO is **NOT YET implemented**. This is a stretch goal. The structural filter `cheap_cuda_score()` below is the design — implement only if time permits after core pipeline works.
 
 ### The Fix: Cheap Structural Filter + Prune Bottom Completions
 
@@ -2003,37 +2062,36 @@ For each GRPO step:
 ### Stage Configurations (Revised)
 
 ```
-STAGE 1 — WARM-UP (Qwen3-Coder-Next 80B FP8):
-  Steps: 40-50
+STAGE 1 — WARM-UP (Qwen3-Coder-30B-A3B-Instruct on H100):
+  Steps: 100
   G: 2
   Max turns: 3
   Temperature: 1.0
   LR: 2e-6
   Action: Free-form generation (learn to compile first)
   Eval: Hybrid (local turns 1-2, Modal turn 3)
-  Credit: MARS+TRLOO
+  Credit: TRLOO (MARS is stretch goal)
   Goal: Compilation rate 50% → 85%
 
 STAGE 2 — RFT:
-  Filter: reward >= 0.0 (revised per GRPO-15: any speedup is useful signal)
+  Filter: reward >= 0.0 (any speedup is useful signal)
   SFT: 3 epochs on filtered trajectories + 192 doubleGraph expert demonstrations
   Goal: Anchor compilation ability + expose model to real A100 patterns
 
-STAGE 3 — CURRICULUM (Qwen3-Coder-Next 80B FP8) — MATCH CONFIG:
-  Steps: 150 (matches CUDA-Agent's 150 — but on 1 GPU, not 128)
+STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H100) — HACKATHON CONFIG:
+  Steps: 50 (hackathon pilot; 150 is future scale-up target)
   G: 2
-  Max turns: 20 (full compile→correct→optimize→tune lifecycle)
+  Max turns: 3-5 (hackathon; 20 is future target)
   Temperature: 0.7
-  LR: 5e-6
-  Context: 32,768 tokens (B200: 92GB free - 40GB KV/activations = 52GB headroom)
-  Action: Free-form generation with rich SKILL.md context (7 real A100 patterns via skill_builder.py)
-  Eval: Hybrid — local nvcc turns 1-5, Modal A100 turns 6+
-  Credit: MARS+TRLOO per-turn cumulative returns
-  Reward: Continuous log(speedup) + Nsight bonus (top-k only)
-  Pruning: CPPO cheap_cuda_score() filter before Modal eval
-  Loss: MASPO soft trust (σ=0.2)
-  Inference: Best-of-8 candidates per problem + SkyDiscover for Level 3
-  Goal: Match CUDA-Agent (98.8% pass, 96.8% faster, 2.11× speedup) at 30-60× lower cost
+  LR: 3e-6
+  Context: 8,192 tokens (H100: ~46GB free — ample headroom)
+  Action: Free-form generation with SKILL.md context (7 real A100 patterns via skill_builder.py)
+  Eval: Hybrid — local nvcc early turns, Modal A100 final turn
+  Credit: TRLOO (MARS per-turn credit is stretch goal, NOT YET)
+  Reward: Continuous log(speedup) + optional Nsight bonus
+  Loss: Standard clip (MASPO is future/optional)
+  Inference: Best-of-N candidates per problem + SkyDiscover hedge
+  Goal: Validate real learning signal, demonstrate candidate improvement
 ```
 
 ### New Files Summary (updated March 5, 2026)
@@ -2056,10 +2114,12 @@ STAGE 3 — CURRICULUM (Qwen3-Coder-Next 80B FP8) — MATCH CONFIG:
 
 **Dropped from v1:** `openenv_env/transform_grammar.py` (~250 LOC) — transformation grammar deferred to v2. Replaced by 7 real A100 patterns in SKILL.md.
 
-### Expected Performance (Match Config: 150 steps, 20 turns, 32K context)
+### Expected Performance — Future Scale-Up Target (NOT Hackathon Claim)
+
+> **WARNING:** The projections below are speculative future targets based on paper results. They are **NOT** hackathon claims. The hackathon will validate the core feedback loop; full benchmark comparison is a later research objective. See claim discipline rules in KERNELFORGE_FINAL_PRD.md Section 7.
 
 ```
-Qwen3-Coder-Next 80B MoE (3B active) via Unsloth FP8 on B200 192GB:
+FUTURE SCALE-UP: Qwen3-Coder-Next 80B on B200 (NOT hackathon config):
   Memory: ~100GB model + ~92GB free for sandbox
   Generation: ~50 tok/s (3B active parameters)
 
@@ -2069,17 +2129,16 @@ Training data:
   Curriculum: 21 problems across 4 phases (5 topology-aware graph tasks)
   SKILL.md: 178 lines, 7 real A100 patterns from production code
 
-Training-time results (pass@1):
-  Compilation rate: 93-96% (Stage 1 warmup + SFT on 192 real expert demos)
-  Functional correctness: 80-88% (MARS per-turn credit + continuous reward)
-  Geo-mean speedup: 1.8-2.1× on combined dataset + WCC + graph algorithms
-  A100 patterns discovered: 12-18 (float4, L2 pinning, shuffles, tiling, launch_bounds,
-    shared mem, warp hash tables, zero-copy convergence, bitmap frontier, etc.)
+Projected training-time results (pass@1) — FUTURE TARGET, NOT PROVEN:
+  Compilation rate: 93-96% (projected, if Stage 1 warmup + SFT on 192 real expert demos)
+  Functional correctness: 80-88% (projected, requires MARS + continuous reward)
+  Geo-mean speedup: 1.8-2.1× (projected, on combined dataset + WCC + graph algorithms)
+  A100 patterns discovered: 12-18 (projected — float4, L2 pinning, shuffles, tiling, etc.)
 
-Inference-time results (best-of-8 + SkyDiscover):
-  Pass rate: 98-99% (matches CUDA-Agent's 98.8%)
-  Faster-than-compile: 93-97% (matches CUDA-Agent's 96.8%)
-  Geo-mean speedup: 2.0-2.3× (matches CUDA-Agent's 2.11×)
+Projected inference-time results (best-of-8 + SkyDiscover) — FUTURE TARGET:
+  Pass rate: 98-99% (projected, CUDA-Agent benchmark: 98.8%)
+  Faster-than-compile: 93-97% (projected, CUDA-Agent benchmark: 96.8%)
+  Geo-mean speedup: 2.0-2.3× (projected, CUDA-Agent benchmark: 2.11×)
 
 Cost & timeline:
   Total evals: ~1,200 Modal calls (CPPO saves ~40%)
@@ -2089,19 +2148,19 @@ Cost & timeline:
   Total cost: ~$155 ($125 after $30 free credit)
   vs CUDA-Agent: ~$5,000-10,000+ (30-60× cheaper)
 
-Why this is credible:
-  - MARS+TRLOO: +23% return (MARSHAL) + unbiased gradients (Dr. Kernel +72% Fast@1.2×)
-  - Continuous reward: +3.6× gradient info per sample vs discrete rewards
-  - CPPO: 40% fewer Modal calls → cleaner gradients + cost savings
-  - 192 expert demos: real A100 patterns as SFT anchor (CUDA-Agent has zero)
-  - 7 SKILL.md patterns: concrete optimization strategies in every prompt
-  - 20 turns + 32K context: full compile→correct→optimize→tune lifecycle
-  - Best-of-8 inference: select fastest correct kernel from 8 candidates
-  - SkyDiscover hedge: evolutionary search fills hardest Level 3 gaps
-  - Effective signal: ~315K vs CUDA-Agent's 153K (2.05× MORE at 30-60× lower cost)
+Why these projections are plausible (research basis):
+  - TRLOO: unbiased gradients (Dr. Kernel arXiv 2602.05885, +72% Fast@1.2×) — IMPLEMENTED
+  - MARS: +23% return in multi-turn (MARSHAL paper) — NOT YET IMPLEMENTED
+  - Continuous reward: proportional gradient signal vs discrete — IMPLEMENTED
+  - CPPO: fewer Modal calls + cleaner gradients — NOT YET IMPLEMENTED
+  - 192 expert demos: real A100 patterns as SFT anchor — IMPLEMENTED
+  - 7 SKILL.md patterns: concrete optimization strategies in every prompt — IMPLEMENTED
+  - Best-of-N inference + SkyDiscover hedge — IMPLEMENTED
+  NOTE: These projections assume full 150-step, 20-turn, B200 scale-up.
+  The hackathon will test the core loop at smaller scale.
 ```
 
-### Why This Revision Succeeds
+### Why This Architecture Has Potential (Future Targets)
 
 | Original PRD Failure | Stacked Fix | Evidence |
 |---------------------|-------------|---------|
@@ -2116,13 +2175,47 @@ Why this is credible:
 | Only 10 steps, 3 turns (demo) | 150 steps, 20 turns (match config) | Multi-turn = #1 CUDA-Agent ablation factor |
 | Single candidate per problem | Best-of-8 inference + AdaEvolve | pass@8 ≈ 99.99%; max speedup selection |
 
-**Bottom line:** This is the March 2026 single-GPU SOTA for agentic CUDA RL. We MATCH CUDA-Agent at 30-60× lower cost. 192 expert A100 kernels + MARS+TRLOO per-turn credit + 7 real optimization patterns + topology-aware curriculum + best-of-8 inference + AdaEvolve+EvoX evolutionary search. Effective signal exceeds CUDA-Agent's 153K samples. You will see optimization discovery (not just syntax) by step 30 of Stage 3. Execute ruthlessly.
+**Bottom line:** This architecture combines multiple research-backed improvements (TRLOO, continuous reward, expert demos, topology-aware curriculum, evolutionary search). The hackathon will validate the core feedback loop at small scale. Full benchmark comparison against CUDA-Agent is a future research target, not a hackathon claim.
 
 ---
 
-## GRPO-15: Optimized Single-B200 Configuration (Matching CUDA-Agent)
+## GRPO-15: Hackathon Config + Future Scale-Up Target
 
-> **Added March 5, 2026. Revised March 5.** Match configuration based on CUDA-Agent ablation analysis + full integration stack. See KERNELFORGE_FINAL_PRD.md Section 7 for full feasibility assessment.
+> **Added March 5, 2026. Revised March 5.** Split into hackathon primary config (15.1) and future scale-up target (15.2). See KERNELFORGE_FINAL_PRD.md Section 13 for future feasibility assessment.
+
+### 15.1 Hackathon GRPO Config (Primary)
+
+```
+HACKATHON STAGE 3 — GRPO PILOT
+  Model: Qwen3-Coder-30B-A3B-Instruct on H100
+  Steps: 50 (pilot — validate signal, not benchmark domination)
+  G: 2
+  Max turns: 3-5
+  Temperature: 0.7
+  LR: 3e-6
+  Context: 8,192 tokens (H100: ~46GB free)
+  Eval: Hybrid — local nvcc early turns, Modal A100 final turn
+  Credit: TRLOO (IMPLEMENTED); MARS (stretch goal)
+  Reward: Continuous log(speedup) + optional Nsight bonus
+  Loss: Standard clip
+  Cost: ~$30-50 (H100 training) + ~$20-40 (A100 eval)
+
+OBJECTIVE:
+  1. Validate real reward signal (not hackable, not degenerate)
+  2. Demonstrate candidate improvement under feedback
+  3. GRPO does not collapse immediately
+  4. Pipeline reusable for future experiments
+
+ABORT GATES:
+  - reward=-1 stays after 30 steps → stop, ship SFT + search
+  - reward std=0 → model collapsed → increase temperature or stop
+  - Loss = NaN → reduce LR to 1e-6
+  - OOM → reduce G/batch/seq
+```
+
+### 15.2 Future Scale-Up Config (Research Target)
+
+The content below describes the future scale-up path using Qwen3-Coder-Next 80B on B200. This is **NOT** the hackathon config.
 
 ### Why the Original Config Falls Short
 
@@ -2137,11 +2230,11 @@ The original GRPO-14 config (10 steps, 3 turns, 4K context) was designed as a "P
 
 **Multi-turn iteration is the #1 factor by far.** With only 3 turns, we leave most of the performance on the table. CUDA-Agent uses up to 150 turns per episode. Most optimization discoveries happen after turn 5 (initial kernel → compile fix → profile → targeted optimization → iterate).
 
-### Match Stage 3 Configuration
+### Future Match Stage 3 Configuration (NOT Hackathon)
 
 ```
-STAGE 3 — GRPO + CURRICULUM (MATCH CONFIG)
-  Model: Qwen3-Coder-Next 80B FP8 on B200
+FUTURE: STAGE 3 — GRPO + CURRICULUM (SCALE-UP TARGET)
+  Model: Qwen3-Coder-Next 80B FP8 on B200 (requires B200)
   Steps: 150 (matches CUDA-Agent's 150 — but on 1 GPU, not 128)
   G: 2
   Max turns: 20 (full compile→correct→optimize→tune lifecycle)
@@ -2157,16 +2250,16 @@ STAGE 3 — GRPO + CURRICULUM (MATCH CONFIG)
   Cost: ~10 hrs B200 ($62.50) + ~10 hrs A100 eval ($25.00) = $87.50
 ```
 
-### Key Changes and Justification
+### Future Scale-Up Key Changes (vs Original Demo Config)
 
 | Change | From → To | Why |
 |--------|----------|-----|
-| Steps | 10 → **150** | Match CUDA-Agent's 150 steps. On 1 GPU (not 128), each step is 12-25× more efficient. |
-| Max turns | 3 → **20** | Multi-turn = #1 ablation factor (-82.7%). 20 turns covers full compile→correct→optimize→tune lifecycle. With MARS credit, 20 turns ≈ 60 flat-credit turns. |
+| Steps | 10 → **150** | Target CUDA-Agent's 150 steps. On 1 GPU (not 128), each step is 12-25× more efficient. |
+| Max turns | 3 → **20** | Multi-turn = #1 ablation factor (-82.7%). 20 turns covers full lifecycle. |
 | Context | 4K → **32K** | At 20 turns × ~1.5K/turn = 30K, need 32K. Fits on B200 (92GB - 40GB KV = 52GB free). |
-| RFT filter | ≥ 1.0 → **≥ 0.0** | Any speedup (log > 0) is useful RFT signal. 192 expert demos in SFT too. |
-| Inference | pass@1 → **best-of-8** | Generate 8 candidates, eval all, pick fastest correct. Closes gap to CUDA-Agent. |
-| Goal | "80-90% of CUDA-Agent" → **Match** | Expert demos + MARS+TRLOO + best-of-8 + SkyDiscover = 2.05× MORE effective signal. |
+| RFT filter | ≥ 1.0 → **≥ 0.0** | Any speedup (log > 0) is useful RFT signal. |
+| Inference | pass@1 → **best-of-8** | Generate 8 candidates, eval all, pick fastest correct. |
+| Goal | Demo → **Approach CUDA-Agent** | Projected target based on stacked improvements. NOT proven. |
 
 ### Multi-Turn Budget Analysis
 
@@ -2195,99 +2288,135 @@ Full pipeline:
   Total: ~$155.50 ($125.50 after $30 free credit)
 ```
 
-### Expected Performance vs CUDA-Agent
+### Projected Performance vs CUDA-Agent (FUTURE TARGET — NOT PROVEN)
 
-| Metric | Training (pass@1) | Inference (best-of-8) | CUDA-Agent | Match? |
-|--------|------------------|----------------------|------------|--------|
-| Pass rate | 93-96% | **98-99%** | 98.8% | **YES ✅** |
-| Faster-than-compile | 80-88% | **93-97%** | 96.8% | **YES ✅** |
-| Geomean speedup | 1.8-2.1× | **2.0-2.3×** | 2.11× | **YES ✅** |
+| Metric | Training (pass@1) | Inference (best-of-8) | CUDA-Agent | Projected? |
+|--------|------------------|----------------------|------------|------------|
+| Pass rate | 93-96% | 98-99% | 98.8% | Projected |
+| Faster-than-compile | 80-88% | 93-97% | 96.8% | Projected |
+| Geomean speedup | 1.8-2.1× | 2.0-2.3× | 2.11× | Projected |
 
-### Data Efficiency Comparison
+### Projected Data Efficiency Comparison (Future Scale-Up)
 
-| Metric | CUDA-Agent | KernelForge (Match Config) | Ratio |
-|--------|------------|--------------------------|-------|
+| Metric | CUDA-Agent | KernelForge (Projected) | Ratio |
+|--------|------------|------------------------|-------|
 | RL samples | 153,600 | ~6,000 (150 steps × G=2 × avg 20 turns) | 25× fewer |
-| Per-sample efficiency | Baseline (PPO, biased) | 12-25× (MARS+TRLOO, unbiased, continuous) | **US** |
-| Effective RL signal | 153,600 | 72,000-150,000 | **~1.0×** (parity) |
-| Expert demonstrations (SFT) | 0 | **192 (doubleGraph A100 kernels, 84K+ lines)** | **∞** |
-| Inference-time candidates | 1 (pass@1) | 8 (best-of-8) | **8×** |
-| Evolutionary search | None | SkyDiscover (same Modal pipeline) | **∞** |
-| Net effective signal | 153,600 | **~315,000** | **2.05× MORE** |
+| Per-sample efficiency | Baseline (PPO, biased) | Projected 12-25× (requires MARS+TRLOO) | Projected |
+| Expert demonstrations (SFT) | 0 | 192 (doubleGraph A100 kernels, 84K+ lines) | Advantage |
+| Inference-time candidates | 1 (pass@1) | 8 (best-of-8) | 8× |
+| Evolutionary search | None | SkyDiscover (same Modal pipeline) | Advantage |
 
-We no longer have a signal gap — we EXCEED CUDA-Agent's effective signal at 30-60× lower cost. The key: CUDA-Agent burns compute on exploration (learning what good CUDA looks like from scratch). We bootstrap with 192 real expert demos + 7 SKILL.md patterns, then spend RL budget entirely on exploitation (problem-specific optimization), where MARS+TRLOO excel. Best-of-8 at inference compounds the advantage.
+**Note:** The "effective signal" comparison assumes full MARS+TRLOO+CPPO stack at 150-step scale, which is the future target. For the hackathon, we validate the core loop at smaller scale. The data efficiency argument is a research hypothesis, not a proven claim.
 
-### Model Size: Why We Stay at 80B
+### Model Size Discussion (Future Scale-Up Context)
+
+For the **hackathon**, the primary model is **Qwen3-Coder-30B-A3B-Instruct** on H100 (see Section 15.1). The discussion below applies to the future B200 scale-up path.
 
 Qwen3-Coder-Next 80B MoE has **only 3B active parameters** due to MoE routing. At inference, it runs like a 3B model but has access to 80B of stored routing knowledge from pre-training on 800K executable code tasks.
 
 | Model | Active | VRAM | Tok/s | CUDA Level 1 | CUDA Level 2-3 |
 |-------|--------|------|-------|--------------|----------------|
-| **Qwen3-Coder-Next 80B** | 3B | ~100 GB | ~50 | **Very Strong** | **Strong** |
+| **Qwen3-Coder-30B-A3B (hackathon)** | 3.3B | ~30-34 GB | ~50 | **Strong** | **Moderate** |
+| **Qwen3-Coder-Next 80B (future)** | 3B | ~100 GB | ~50 | **Very Strong** | **Strong** |
 | Qwen3.5-32B | 32B | ~32 GB | ~80 | Strong | Moderate |
 | Qwen3.5-9B | 9B | ~9 GB | ~150 | Moderate | Weak |
 
-Going to 9B or 32B saves VRAM but loses the MoE routing knowledge. The 80B model's CUDA capability comes from its 800K-task agentic pre-training — a smaller model would need 5-10× more GRPO steps to compensate, likely overshooting our $45 budget.
+**Hackathon decision:** Use Qwen3-Coder-30B-A3B-Instruct on H100. Fall back to Qwen3.5-35B-A3B if needed.
+**Future decision:** Scale to Qwen3-Coder-Next 80B FP8 on B200 for deeper experiments.
 
-**Decision:** Stay with Qwen3-Coder-Next 80B FP8. Fall back to Qwen3.5-9B only if Gate G-0.2 fails (doesn't fit on B200).
-
-### Updated Quick Reference Card (Replaces GRPO-8 Stacked Config)
+### Updated Quick Reference Card (March 5, 2026)
 
 ```
-GRPO-15 MATCH CONFIGURATION (March 5, 2026):
+═══════════════════════════════════════════════════════════
+HACKATHON CONFIG (PRIMARY — this weekend)
+═══════════════════════════════════════════════════════════
+  Model = Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active)
+  Train GPU = H100 ($3.95/hr)
+  Eval GPU = A100 80GB ($2.50/hr)
   G = 2
-  Steps = 300 (Stage 1) + RFT + 150 (Stage 3)
-  Max turns = 5 (Stage 1) / 20 (Stage 3)
-  Context = 8192 (Stage 1) / 32768 (Stage 3)
-  Credit = MARS+TRLOO cumulative per-turn
-  Reward = Nsight continuous log(speedup) + bonus (top-k)
-  Loss = MASPO soft trust σ=0.2 or standard clip
-  Pruning = CPPO top-2 of G after cheap filter (~40% Modal savings)
-  Eval = Hybrid: local nvcc turns 1-5, Modal A100 turns 6+
-  Inference = Best-of-8 per problem + AdaEvolve for Level 3
+  Steps = 100 (Stage 1) + RFT + 50 (Stage 3 pilot)
+  Max turns = 3 (Stage 1) / 3-5 (Stage 3)
+  Context = 8192
+  Credit = TRLOO (IMPLEMENTED); MARS (stretch goal)
+  Reward = continuous log(speedup) + optional Nsight bonus
+  Loss = standard clip
+  Eval = Hybrid: local nvcc early turns, Modal A100 final turn
+  Inference = Best-of-N per problem + SkyDiscover hedge
 
-DATA SOURCES:
+  COST (hackathon):
+    SFT warmup: ~$8
+    Stage 1 (100 steps): ~$15
+    Stage 2 (RFT): ~$2
+    Stage 3 (50 steps, pilot): ~$15
+    A100 eval: ~$20-40
+    Search + testing: ~$15-25
+    Total: ~$75-105 (under $200 budget)
+
+  OBJECTIVE: Validate real learning signal. Not benchmark domination.
+
+═══════════════════════════════════════════════════════════
+FUTURE SCALE-UP CONFIG (research target — after hackathon)
+═══════════════════════════════════════════════════════════
+  Model = Qwen3-Coder-Next 80B FP8 (requires B200)
+  G = 2, Steps = 150, Max turns = 20, Context = 32768
+  Full MARS+TRLOO+CPPO+MASPO stack
+  Cost: ~$155
+  Target: approach CUDA-Agent metrics (projected, not proven)
+
+DATA SOURCES (shared):
   Ops-6K: 6,000 PyTorch operator tasks (GRPO prompts)
   doubleGraph: 192 expert A100 kernels (SFT + GRPO prompts, 84K+ lines)
   Curriculum: 21 problems across 4 phases (5 topology-aware graph tasks)
   SKILL.md: 178 lines, 7 real A100 patterns from doubleGraph production code
 
 INTEGRATION STATUS:
-  doubleGraph dataset harvester: DONE (datasets/extract_doublegraph_a100.py → 3 TRL formats)
+  doubleGraph dataset harvester: DONE (datasets/extract_doublegraph_a100.py)
   SKILL.md A100 patterns: DONE (skill_builder.py:_append_a100_patterns())
   Evaluator bridge (cascade eval): DONE (skydiscover_integration/evaluator.py)
   AdaEvolve multi-island search: DONE (skydiscover_integration/adaevolve.py)
   EvoX self-evolving strategies: DONE (skydiscover_integration/evox_strategies.py)
-  Topology-aware curriculum: DONE (training/curriculum.py Phase 2-3, with graph_properties)
-  Graph topology in RL observations: DONE (kernel_forge_env.py + curriculum.py + rollout)
-  Nsight lightweight profiling: DONE (modal_app.py ptxas occupancy + warp info)
+  Topology-aware curriculum: DONE (training/curriculum.py Phase 2-3)
+  Graph topology in RL observations: DONE (kernel_forge_env.py + curriculum.py)
+  Nsight lightweight profiling: DONE (modal_app.py ptxas occupancy)
   TRLOO trainer: DONE (training/custom_grpo_trainer.py)
   Local compile fast-path: DONE (training/multi_turn_rollout.py)
-  MARS return-to-go: NOT YET (~50 LOC)
-  CPPO pruning: NOT YET (~40 LOC)
-  MASPO soft trust: NOT YET (~50 LOC)
-
-B200 MEMORY (32K context):
-  Coder-Next 80B FP8: ~100 GB total → 92 GB free
-  KV cache + activations at 32K: ~40 GB → 52 GB free → fits
-
-COST:
-  Stage 1 (300 steps): ~$22
-  Stage 2 (RFT): ~$3
-  Stage 3 (150 steps, 20 turns): ~$87.50
-  Best-of-8 inference: ~$8
-  SkyDiscover: ~$10
-  Testing/debug: ~$25
-  Total: ~$155.50 ($125.50 after $30 free credit)
-  vs CUDA-Agent: ~$5,000-10,000+ (30-60× cheaper)
-
-TARGET: MATCH CUDA-Agent benchmark
-  Training (pass@1):
-    Pass rate: 93-96% | Faster: 80-88% | Speedup: 1.8-2.1×
-  Inference (best-of-8 + SkyDiscover):
-    Pass rate: 98-99% | Faster: 93-97% | Speedup: 2.0-2.3×
-  CUDA-Agent:
-    Pass rate: 98.8%  | Faster: 96.8%  | Speedup: 2.11×
-
-EFFECTIVE SIGNAL: ~315K vs CUDA-Agent's 153K (2.05× MORE at 30-60× lower cost)
+  MARS return-to-go: NOT YET — hackathon stretch goal (~50 LOC)
+  CPPO pruning: NOT YET — hackathon stretch goal (~40 LOC)
+  MASPO soft trust: NOT YET — future (~50 LOC)
 ```
+
+---
+
+## GRPO-16: Presentation Framing
+
+When talking to judges or writing the demo narrative:
+
+**Say:**
+- "We built a low-cost kernel optimization RL/search environment"
+- "We targeted A100 kernels with real compile / correctness / timing feedback"
+- "We used Qwen3-Coder-30B-A3B-Instruct on H100 as the practical hackathon base"
+- "This is designed to scale into richer RL, distillation, and future hardware"
+
+**Do NOT say:**
+- "We already beat CUDA-Agent"
+- "We proved single-GPU SOTA"
+- "We fully reproduced large-scale paper results"
+
+**Claim discipline applies:** Only claim what has actually been run. Separate implemented / tested / benchmarked / projected. See KERNELFORGE_FINAL_PRD.md Section 7 for the full claim taxonomy.
+
+---
+
+## GRPO-17: Abort Gates (Consolidated)
+
+Abort or shrink RL scope if any of these trigger:
+
+| Trigger | Meaning | Action |
+|---------|---------|--------|
+| reward=-1 stays after 30 SFT+GRPO steps | Dataset or reward pipeline is broken | Debug reward. If unfixable, ship SFT + search only. |
+| reward std=0 for >5 consecutive steps | Model collapsed, all outputs identical | Increase temperature to 1.2. If persists, stop GRPO. |
+| Loss = NaN | LR too high or numerical instability | Reduce LR to 1e-6. If persists, stop GRPO. |
+| OOM | Model/context too large for H100 | Reduce G to 1, reduce context, reduce batch. |
+| Eval throughput eats >60% of budget | A100 eval calls too expensive | Simplify to single-turn, reduce step count. |
+| Gate G-0.8 fails (no speedup >1.2× in 5-step sanity check) | Model cannot optimize on this task distribution | Abandon GRPO entirely. Ship SFT + SkyDiscover + environment. |
+
+**If abort triggers:** Ship SFT + search + environment. Do NOT fake an RL success story. A working environment with honest search results is a better hackathon submission than a broken RL pipeline with inflated claims.
