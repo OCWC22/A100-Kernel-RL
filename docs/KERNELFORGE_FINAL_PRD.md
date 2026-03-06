@@ -499,6 +499,11 @@ This section is the **live status tracker** for what is actually implemented in 
 **Time:** 2-4 hours (parallel)
 **Owner:** Anyone with internet
 
+**Current status (March 6): Partial**
+- The repo already contains the DoubleGraph manifest and Stage 2 DoubleGraph SFT priors, so the structured-prior path is not blocked on first-pass asset generation. Sources: [doubleGraph repo](https://github.com/double-ai/doubleGraph), [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K).
+- What is still not verified in this PRD is whether the local machine or remote training environment has all external downloads and cloned repos present in the exact expected layout.
+- The doubleGraph wheel remains optional stretch work, not a hard blocker for prompt/data priors.
+
 **Subtask 0.1.1: Download Qwen3-Coder-30B-A3B-Instruct (~18GB)**
 ```bash
 mkdir -p ~/kernelforge && cd ~/kernelforge
@@ -577,6 +582,11 @@ ls skydiscover/  # SkyDiscover repo
 **Priority:** P0 BLOCKING
 **Time:** 1-2 hours
 
+**Current status (March 6): Partial**
+- The codebase now has a working preflight path in `training/grpo_train.py`, and that preflight passes locally under `uv` with the current repo assets.
+- The training stack now supports Hopper/H200 in code as well, but the hackathon PRD still treats H100 as the default training target and A100 as the eval target. H200 reference: [NVIDIA H200](https://www.nvidia.com/en-us/data-center/h200/).
+- The remaining blocker is not package wiring in the repo; it is real remote execution readiness, especially Modal auth and a successful smoke test on remote GPU. OpenEnv installation reference: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [TRL OpenEnv docs](https://huggingface.co/docs/trl/main/en/openenv).
+
 **Subtask 0.2.1: Install Python packages**
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu124
@@ -637,6 +647,11 @@ STRETCH GOAL: If this fails, skip entirely. Dense ops + doubleGraph patterns fro
 **Time:** 2-3 hours
 **Owner:** Lead engineer
 
+**Current status (March 6): Partial**
+- KernelForge already implements its own evaluator routing and reward contract, but this task is still relevant because CUDA-Agent remains the conceptual reference for the compile / verify / profile loop and skill-augmented execution framing. Sources: [CUDA-Agent paper](https://arxiv.org/abs/2602.24286), [CUDA-Agent project page](https://cuda-agent.github.io/).
+- What is not yet locked in the PRD is a line-by-line validation that the repo's evaluator semantics match the intended CUDA-Agent-style contract closely enough for the hackathon story.
+- The immediate goal here is no longer "copy scripts blindly"; it is "verify compatibility, note differences, and document the exact KernelForge contract."
+
 **Subtask 0.3.1: Read and understand the evaluation scripts**
 ```bash
 # Read each file. Take notes on:
@@ -693,6 +708,11 @@ Write a short note:
 #### Task 0.4: Extract doubleGraph A100 Patterns
 **Priority:** P1 — enriches prompts and provides graph tasks
 **Time:** 2 hours
+
+**Current status (March 6): Mostly done for the hackathon path**
+- The repo already contains a harvested DoubleGraph manifest, topology-aware graph metadata, curriculum problem injection, and A100 expert-pattern prompt material. Source: [doubleGraph repo](https://github.com/double-ai/doubleGraph).
+- For the hackathon path, the important part of this task is effectively complete: DoubleGraph is already functioning as a prompt/data prior.
+- The only unfinished part is optional runtime baseline profiling against a live doubleGraph install, which remains stretch work.
 
 **Subtask 0.4.1: Survey the A100 kernel directory**
 
@@ -910,6 +930,11 @@ def _estimated_baselines():
 **Time:** 4-8 hours (run overnight Thursday)
 **Cost:** ~$5-15 in GLM-5 API calls
 
+**Current status (March 6): Partial, with a changed implementation path**
+- The repo already includes `datasets/doublegraph_sft.jsonl`, and Stage 2 now merges those DoubleGraph SFT priors with filtered trajectories before SFT.
+- That means the project is no longer fully blocked on generating a fresh synthetic SFT corpus before any progress can happen.
+- What is still valuable is generating or collecting additional verified kernel-response pairs if the Stage 1 compile rate is too weak, but that is now an optimization path rather than the only path forward. Source: [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K).
+
 ```python
 # data/generate_sft.py
 """
@@ -998,6 +1023,11 @@ print(f"\nResults: {compilable}/{len(sft_pairs)} compile ({100*compilable/len(sf
 **Time:** 1-2 hours
 **Cost:** ~$1-2
 
+**Current status (March 6): Partial**
+- The repo already has a `skydiscover_integration/` package and seed kernels, so the code-side integration exists.
+- What is still missing is a currently documented, successful end-to-end validation run showing that the search hedge improves a seed candidate under the present evaluator assumptions.
+- This remains useful because the PRD explicitly keeps search as a hedge if RL underperforms. Source: [SkyDiscover repo](https://github.com/skydiscover-ai/skydiscover).
+
 ```bash
 cd ~/kernelforge/skydiscover
 uv sync --extra external
@@ -1041,6 +1071,11 @@ uv run skydiscover-run \
 **Priority:** P0 BLOCKING — must pass before hackathon
 **Time:** 2-3 hours
 
+**Current status (March 6): Partial**
+- Repo preflight now passes locally, which is a meaningful improvement over the earlier state, but it is not the same thing as the full validation matrix being green.
+- The true gate for this task is still remote execution validation: smoke test, Stage 1 short run, Stage 2 short run, and Stage 3 short run.
+- Until those pass, this task should remain blocking even though the codebase is materially closer to launch than it was before. OpenEnv/TRL integration references: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [TRL OpenEnv docs](https://huggingface.co/docs/trl/main/en/openenv).
+
 Run tests 01-08 from the validation/ directory (see previous response for all test code). Each test validates one layer:
 
 | Test | What It Validates | Must Pass? |
@@ -1072,6 +1107,11 @@ model, tokenizer = FastLanguageModel.from_pretrained(
 #### Task 1: `evaluation/sandbox.py` — Subprocess Isolation
 **Priority:** P0 | **Time:** 30 min | **Depends on:** Nothing
 
+**Current status (March 6): Not done as specified**
+- There is no authoritative `evaluation/sandbox.py` module in the current repo.
+- In practice, isolation and fail-fast behavior currently live more in the Modal execution boundary and per-task evaluation flow than in a dedicated local sandbox abstraction.
+- If we keep the current architecture, this task should be reinterpreted as a robustness hardening task rather than a literal file-creation requirement.
+
 Run any Python script in a subprocess. Return stdout/stderr/returncode. Handle timeouts and segfaults. ~60 LOC.
 
 Key function: `run_in_sandbox(script: str, timeout: int) -> SandboxResult`
@@ -1085,6 +1125,11 @@ Key function: `run_in_sandbox(script: str, timeout: int) -> SandboxResult`
 #### Task 2: `evaluation/compiler.py` — nvcc Wrapper
 **Priority:** P0 | **Time:** 30 min | **Depends on:** Task 1
 
+**Current status (March 6): Partial, implemented under a different path**
+- There is no authoritative `evaluation/compiler.py` file in the repo today.
+- Equivalent compile-path logic currently exists inside the Modal evaluation stack, especially `modal_app.py`, which already builds guarded `nvcc` commands and uses `sm_80`-targeted compilation for A100 evaluation.
+- This means the compile path exists, but the PRD should treat the missing dedicated wrapper module as technical debt rather than proof that compile support is absent.
+
 Compile CUDA source to .so with `nvcc -arch=sm_80 -O3 --use_fast_math -shared`. Parse `// CU_FLAGS:` comments (whitelisted flags only). ~80 LOC.
 
 Key function: `compile_cuda(source: str, extra_flags: list) -> CompileResult`
@@ -1097,6 +1142,11 @@ Key function: `compile_cuda(source: str, extra_flags: list) -> CompileResult`
 
 #### Task 3: `evaluation/verifier.py` — Correctness Checking
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Tasks 1, 2
+
+**Current status (March 6): Partial, implemented across Modal + task-routing code**
+- There is no dedicated `evaluation/verifier.py` module in the repo today.
+- However, correctness gating is already part of the current evaluation contract: task routing lives in `training/task_support.py`, evaluator dispatch lives through Modal, and correctness remains a hard gate before positive reward.
+- The missing piece is not the idea of verification; it is a fully verified end-to-end remote run proving the correctness path works reliably on the actual A100 backend.
 
 **Execution-based correctness is mandatory (P0).** CUDABench (arXiv 2603.02236) explicitly reports "mismatch between high compilation success and low functional correctness" — compile success alone is a bad proxy that enables reward hacking (model learns minimal kernels that compile but produce garbage). Verification must:
 1. Check compiled .so for forbidden symbols via `nm -D`
@@ -1115,6 +1165,11 @@ Key function: `verify_kernel(so_path: str, task_code: str) -> VerifyResult`
 #### Task 4: `evaluation/profiler.py` — Baseline Timing
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Task 1
 
+**Current status (March 6): Partial, implemented under Modal evaluator paths**
+- There is no dedicated `evaluation/profiler.py` module in the repo today.
+- Baseline timing functionality is currently expressed through the Modal-side evaluator and baseline helpers rather than through a separate local profiler abstraction.
+- The remaining open work is validation, not just implementation: we still need confirmed remote A100 baseline timings on the deployed path before this task can be called fully done.
+
 Profile torch.eager and torch.compile for a task on **A100 (Modal)**. CUDA events, 50 warmup, 30 runs, trimmed mean. **Must run on A100 — H100 timings are for the wrong architecture.**
 
 Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` and `compile_ms`.
@@ -1125,6 +1180,11 @@ Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` an
 
 #### Task 5: `openenv_env/reward.py` — GRPO Reward Function
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Tasks 1-4
+
+**Current status (March 6): Partial, core reward logic exists**
+- `openenv_env/reward.py` exists and the canonical reward computation is already integrated into the current training/evaluation stack.
+- The current code correctly preserves the main hackathon rule that failed compile or failed correctness cannot receive positive reward.
+- What is still unfinished is the full validation story for the end-to-end fast path on live Modal A100 runs and any optional slow-path bonus logic.
 
 THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, dispatches to Modal A100 for execution-based correctness + speedup timing.
 
@@ -1164,6 +1224,11 @@ Key function: `cuda_kernel_reward(prompts, completions, **kwargs) -> list[float]
 #### Task 6: `evaluation/antihack.py` — Anti-Reward-Hacking
 **Priority:** P1 | **Time:** 30 min | **Depends on:** Nothing
 
+**Current status (March 6): Done, implemented under a different module name**
+- The anti-hack functionality already exists as `openenv_env/anti_hack.py` rather than `evaluation/antihack.py`.
+- That module is already used by the Modal evaluation path for CU_FLAGS extraction and forbidden-symbol checks.
+- The PRD should therefore treat this task as complete in substance, with only a path/name mismatch from the earlier plan.
+
 Forbidden symbol list, CU_FLAGS whitelist, file size checks. Referenced by verifier.py.
 
 From CUDA Agent Section 3.2:
@@ -1175,6 +1240,11 @@ From CUDA Agent Section 3.2:
 #### Task 7: `data/loader.py` — Dataset Loading
 **Priority:** P0 | **Time:** 45 min | **Depends on:** Nothing
 
+**Current status (March 6): Done, implemented as `training/dataset_loader.py`**
+- The stage-aware loader already exists and is authoritative under `training/dataset_loader.py`.
+- It supports `stage1`, `stage2`, and `stage3`, and it is already wired into the training entrypoints.
+- The PRD should consider the original `data/loader.py` filename superseded by the current training module layout.
+
 Load Ops-6K. Format prompts with SKILL.md. Filter by stage (warmup=single-op, curriculum=all). **Embed task_code + metadata directly into `prompt` column** for robustness (extra columns reach reward only if `remove_unused_columns=False`). Also set `remove_unused_columns=False` in GRPOConfig as belt-and-suspenders.
 
 Key function: `load_training_dataset(stage: str) -> Dataset`
@@ -1183,6 +1253,11 @@ Key function: `load_training_dataset(stage: str) -> Dataset`
 
 #### Task 7b: `datasets/build_combined_dataset.py` — Combined Dataset Pipeline
 **Priority:** P0 | **Time:** 1-2 hours | **Depends on:** Task 7, Task 22
+
+**Current status (March 6): Done**
+- `datasets/build_combined_dataset.py` is present and already acts as the unified builder for DoubleGraph manifest rows plus CUDA-Agent-style tasks.
+- The combined output and stage-aware loading path are already integrated into the current training stack.
+- What remains is validating real remote coverage and outcome quality, not basic dataset-pipeline existence.
 
 Build a unified JSONL dataset that merges:
 - doubleGraph A100 manifest (192 topology-aware graph kernels)
@@ -1214,6 +1289,11 @@ Integration companion:
 #### Task 8: `data/doublegraph_tasks.py` — Graph Algorithm Tasks
 **Priority:** P1 | **Time:** 1 hour | **Depends on:** Task 0.4
 
+**Current status (March 6): Mostly done, implemented across dataset/curriculum modules**
+- The exact filename in this task does not exist, but the underlying work is already represented in the DoubleGraph manifest pipeline and topology-aware curriculum tasks.
+- For the hackathon path, this should be treated as substantially complete.
+- The remaining work is mainly improving evaluator coverage for graph-task families beyond the currently supported slice.
+
 Load graph algorithm tasks from doubleGraph's A100 kernel directory. Each task includes the expert kernel (ceiling) and algorithm specification.
 
 Key function: `load_graph_tasks() -> list[dict]`
@@ -1225,6 +1305,11 @@ Key function: `load_graph_tasks() -> list[dict]`
 #### Task 9: `data/skill_a100.md` — Agent SKILL.md
 **Priority:** P0 | **Time:** 30 min | **Depends on:** Task 0.4
 
+**Current status (March 6): Done in substance**
+- The repo already has `skill_a100.md`, and `openenv_env/skill_builder.py` augments it with DoubleGraph-derived A100 expert patterns.
+- The skill prior is already used in rollout generation and Stage 2 trajectory collection.
+- This task should therefore be treated as done for the hackathon path.
+
 The A100 optimization context given to the model in every prompt. Includes hardware specs, optimization priority order, doubleGraph patterns, and rules.
 
 Content from Unified Spec Section 7. Add doubleGraph-extracted patterns from `a100_patterns.md`.
@@ -1233,6 +1318,11 @@ Content from Unified Spec Section 7. Add doubleGraph-extracted patterns from `a1
 
 #### Task 10: `data/a100_patterns.md` — doubleGraph Examples
 **Priority:** P1 | **Time:** 30 min | **Depends on:** Task 0.4
+
+**Current status (March 6): Partial / effectively absorbed by other artifacts**
+- The repo already contains DoubleGraph pattern extraction in active use, but not necessarily under this exact standalone artifact name in the main training path.
+- For the hackathon path, the important requirement is already satisfied: the patterns are present in prompt context and skill construction.
+- If needed later, this task can be completed by generating a dedicated standalone artifact for documentation convenience, not because the training path lacks the patterns.
 
 5-10 code snippets from doubleGraph's A100 kernels showing sm_80-specific optimizations. Used as few-shot examples in SKILL.md.
 
@@ -1243,22 +1333,27 @@ Content from Unified Spec Section 7. Add doubleGraph-extracted patterns from `a1
 #### Task 11: `training/run.py` — Main Entry Point
 **Priority:** P0 | **Time:** 2 hours | **Depends on:** Tasks 1-7, 9
 
+**Current status (March 6): Done, implemented under a different entrypoint name**
+- The repo's authoritative launcher is now `training/grpo_train.py`, not `training/run.py`.
+- In addition, `modal_train.py` exists for remote GPU execution and short smoke / stage runs.
+- The main remaining work here is runtime validation, not missing orchestration code.
+
 The main training script. Loads Qwen3-Coder-30B-A3B-Instruct with Unsloth, runs SFT warmup + GRPO pilot pipeline.
 
-**Hackathon command:**
+**Hackathon command (current repo):**
 
-```python
-# Default command (Saturday morning):
-python -m training.run \
-    --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
-    --output_dir ./checkpoints \
-    --stage all
+```bash
+# Local preflight
+uv run python -m training.grpo_train --preflight-only
 
-# If primary model has issues, fallback:
-python -m training.run \
-    --model Qwen/Qwen3.5-35B-A3B \
-    --output_dir ./checkpoints \
-    --stage all
+# Local orchestrator
+uv run python -m training.grpo_train --stage pipeline
+
+# Remote smoke / stage runs on Modal
+modal run modal_train.py --stage 0
+modal run modal_train.py --stage 1
+modal run modal_train.py --stage 2
+modal run modal_train.py --stage 3
 ```
 
 Key settings for hackathon:
@@ -1276,6 +1371,11 @@ Key settings for hackathon:
 #### Task 12-14: Stage Configs (Hackathon)
 **Priority:** P0 | **Time:** Included in Task 11
 
+**Current status (March 6): Mostly done in code, pending runtime validation**
+- Stage-specific entrypoints exist as `training/stage1_warmup.py`, `training/stage2_rft.py`, and `training/stage3_grpo.py`.
+- Their current effective values are controlled by code defaults and environment variables rather than by a single central config file.
+- The remaining work is validating these settings on the real remote path, not inventing the stage split from scratch.
+
 Stage configs for SFT warmup and GRPO pilot on H100 + A100 eval.
 
 | Stage | Steps | Temp | LR | Context | G | Max Turns |
@@ -1290,6 +1390,11 @@ Stage configs for SFT warmup and GRPO pilot on H100 + A100 eval.
 **Priority:** P0 — judges call `step()` first. Must be robust.
 **Time:** 2-3 hours
 **Depends on:** Tasks 1-5
+
+**Current status (March 6): Partial, implemented under `openenv_env/` rather than `openenv_wrapper/`**
+- The current repo already has `openenv_env/kernel_forge_env.py`, which is the real implementation path for the OpenEnv-style environment contract using `step()`, `reset()`, and `state()`. OpenEnv interface references: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv repo](https://github.com/meta-pytorch/OpenEnv).
+- What remains unfinished is packaging discipline and judge-readiness: startup robustness, deployment wrapper clarity, and a fully validated demo/server path.
+- The PRD should treat this as an active packaging/hardening task, not as a from-scratch implementation task anymore.
 
 Wrap `openenv_env/reward.py` in OpenEnv's `step()/reset()/state()` API. The core logic is identical — this is packaging.
 
@@ -1447,9 +1552,17 @@ These feed into:
 #### Task 25: Saturday Morning Decision Point
 **Time:** 30 minutes
 
+**Current status (March 6): Not done**
+- This remains an operational decision gate, not a code-complete task.
+- The current repo is now ready for a real preflight and smoke-test-first workflow, but the actual Saturday decision still depends on measured compile rate and remote execution stability.
+
 ```bash
-# Load model, test 20 kernels, check compilation rate
-python validation/test_07_compilation_rate.py
+# First confirm the stack boots
+uv run python -m training.grpo_train --preflight-only
+modal run modal_train.py --stage 0
+
+# Then evaluate whether to run short or longer warmup / GRPO passes
+# based on observed compile rate and reward behavior.
 
 # Result determines Stage 1:
 #   ≥70% → Skip Stage 1, go to Stage 2 RFT
@@ -1461,20 +1574,37 @@ python validation/test_07_compilation_rate.py
 
 #### Task 26: Launch SkyDiscover (Parallel Track)
 **Time:** 2 hours setup, runs in background
+
+**Current status (March 6): Partial**
+- Integration code exists, but this task still needs a validated real run under the current evaluator assumptions.
+
 ```bash
 bash skydiscover_integration/run_evolution.sh
 ```
 
 #### Task 27: Launch GRPO Training
 **Time:** Runs 7-12 hours in background
+
+**Current status (March 6): Partial**
+- The launch paths exist, but the real blocker remains Modal auth plus successful short remote validation runs.
+
 ```bash
-python -m training.run \
-    --model Qwen/Qwen3-Coder-30B-A3B-Instruct \
-    --stage all --output_dir ./checkpoints
+# Recommended order:
+modal run modal_train.py --stage 1 --max-steps 10
+modal run modal_train.py --stage 2
+modal run modal_train.py --stage 3 --max-steps 10
+
+# If running locally with the orchestrator after preflight:
+uv run python -m training.grpo_train --stage pipeline
 ```
 
 #### Task 28: doubleGraph Comparison (if installed)
 **Time:** 1-2 hours
+
+**Current status (March 6): Partial / optional**
+- Prompt/data prior integration from DoubleGraph is already in place.
+- This task remains optional runtime comparison work if a live doubleGraph install is available.
+
 ```bash
 python doublegraph_integration/baseline_profiler.py
 ```
