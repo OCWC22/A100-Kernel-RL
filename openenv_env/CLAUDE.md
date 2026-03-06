@@ -70,8 +70,9 @@ def compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile,
 | Return | Condition |
 |--------|-----------|
 | -1.0 | not compiled OR not execution-correct (compile-only is NOT sufficient) |
-| log(speedup) | fast path: CUDA events timing on A100 + execution correctness |
-| log(speedup) + nsight_bonus | slow path (top-k): + 0.4*occ + 0.3*mem + 0.2*warp from ncu |
+| 1.0 | correct but not faster than baselines |
+| 2.0 | correct and faster than eager PyTorch (>5%) |
+| 3.0 | correct and faster than torch.compile (>5%) |
 
 ```python
 def trloo_post_process(advantages: list[float], n: int) -> list[float]
@@ -80,7 +81,7 @@ Scales GRPO advantages by N/(N-1) to correct Dr. Kernel gradient shrinkage.
 
 ## Nsight Integration
 
-Nsight metrics (occupancy, mem_coalescing, warp_efficiency) are passed as optional kwargs to `compute_reward()`. When available, they add a continuous bonus: `0.4*occ + 0.3*mem + 0.2*warp`.
+Nsight metrics (occupancy, mem_coalescing, warp_efficiency) are accepted as optional kwargs in `compute_reward()` for API compatibility but are **unused in discrete reward mode**. The discrete milestone scheme {-1, 1, 2, 3} does not incorporate profiling bonuses — it rewards based on correctness and speedup tiers only.
 
 ## Anti-Hack (`anti_hack.py`)
 
@@ -140,9 +141,9 @@ LRU eviction. Calls `close()` or `release()` on evicted entries.
 
 Entry type: `GPUCacheEntry(key: str, value: Any, metadata: dict)`
 
-## Nsight Integration — DONE (in compute_reward)
+## Nsight Integration — API COMPAT ONLY
 
-Nsight metrics (occupancy, mem_coalescing, warp_efficiency) are already supported as optional kwargs in `compute_reward()`. When provided, they add bonus: `0.4*occ + 0.3*mem + 0.2*warp`. No separate `reward_nsight.py` needed.
+Nsight metric kwargs (occupancy, mem_coalescing, warp_efficiency) are accepted by `compute_reward()` but **unused in discrete reward mode**. Discrete milestones normalize across problem difficulty without profiling bonuses. No separate `reward_nsight.py` needed.
 
 ## Transform Grammar — DEFERRED TO v2
 

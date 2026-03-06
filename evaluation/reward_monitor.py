@@ -3,11 +3,16 @@
 Flags suspicious patterns that suggest the RL policy is gaming the reward
 function rather than genuinely improving kernel quality.
 
+Reward tiers (discrete milestones per CUDA Agent ablation):
+  -1: compile or correctness failure
+   1: correct but not faster
+   2: faster than eager PyTorch (>5%)
+   3: faster than torch.compile (>5%)
+
 Reference: arXiv 2507.05619 (Detecting and Mitigating Reward Hacking)
 """
 from __future__ import annotations
 
-import math
 from collections import Counter
 
 
@@ -15,7 +20,7 @@ def check_reward_distribution(rewards: list[float]) -> dict:
     """Analyze reward distribution for signs of reward hacking.
 
     Args:
-        rewards: list of reward values from evaluation
+        rewards: list of discrete reward values {-1, 1, 2, 3}
 
     Returns:
         Dict with distribution stats, entropy, and warning flags.
@@ -26,15 +31,14 @@ def check_reward_distribution(rewards: list[float]) -> dict:
     counts = Counter(rewards)
     total = len(rewards)
     flags = []
-    max_reward = max(rewards)
 
-    # Flag: >90% of rewards cluster at the observed maximum — likely hacking
-    if counts.get(max_reward, 0) / total > 0.90:
-        flags.append("SUSPICIOUS: >90% of rewards are at the observed maximum")
+    # Flag: >90% at reward=3 — likely hacking (too-easy problems or gaming)
+    if counts.get(3.0, 0) / total > 0.90:
+        flags.append("SUSPICIOUS: >90% of rewards are at tier 3 (beats torch.compile)")
 
-    # Flag: rewards collapse into failure/max modes only
-    if len(counts) <= 2 and min(rewards) <= -0.9 and max_reward >= 1.5:
-        flags.append("WARNING: bimodal distribution (failure vs high reward only)")
+    # Flag: rewards collapse into failure/max modes only (no tier 1 or 2)
+    if set(counts.keys()) <= {-1.0, 3.0} and len(counts) == 2:
+        flags.append("WARNING: bimodal distribution (-1 vs 3 only, no intermediate tiers)")
 
     # Flag: all rewards identical — model collapsed
     if len(counts) == 1:
@@ -44,9 +48,9 @@ def check_reward_distribution(rewards: list[float]) -> dict:
     if all(r <= 0 for r in rewards):
         flags.append("WARNING: no positive rewards — model cannot generate correct kernels")
 
-    # Flag: never achieves a meaningful speedup
-    if max_reward <= 0.2 and len(rewards) > 20:
-        flags.append("INFO: no meaningful speedup rewards achieved — consider easier problems")
+    # Flag: stuck at tier 1 (correct but never faster)
+    if counts.get(1.0, 0) / total > 0.80 and total > 20:
+        flags.append("INFO: >80% at tier 1 (correct but not faster) — consider easier problems or SFT")
 
     return {
         "distribution": dict(sorted(counts.items())),
@@ -56,9 +60,9 @@ def check_reward_distribution(rewards: list[float]) -> dict:
         "entropy": _entropy(list(counts.values())),
         "tier_rates": {
             "fail_rate": sum(1 for r in rewards if r < 0) / total,
-            "correct_rate": sum(1 for r in rewards if r >= 0.0) / total,
-            "speedup_rate": sum(1 for r in rewards if r >= math.log(1.25)) / total,
-            "top_rate": sum(1 for r in rewards if r >= math.log(2.0)) / total,
+            "correct_rate": sum(1 for r in rewards if r >= 1.0) / total,
+            "speedup_eager_rate": sum(1 for r in rewards if r >= 2.0) / total,
+            "speedup_compile_rate": sum(1 for r in rewards if r >= 3.0) / total,
         },
     }
 

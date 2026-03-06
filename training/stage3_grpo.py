@@ -1,23 +1,24 @@
 """
-Stage 3: GRPO with Curriculum — P3 optional demo (10 steps).
+Stage 3: GRPO with Curriculum — hackathon pilot (50 steps).
 
-GPU split: B200 handles model weights + generation + gradient updates.
+GPU split: H100 handles model weights + generation + gradient updates.
            A100 (Modal) handles all performance reward (speedup, correctness).
-           You cannot optimize A100 performance by measuring on B200.
+           You cannot optimize A100 performance by measuring on H100.
 
 Multi-turn agentic training via TRL's rollout_func:
-  - 3 turns per episode (reduced from 5 — TRLOO bias compounds with turns)
+  - 3-5 turns per episode
   - CurriculumManager for progressive difficulty
   - Temperature 0.7 for exploitation
-  - LR 5e-6 for faster convergence
-  - 10 max_steps (P3 demo — only if Gate G-0.8 passes)
+  - LR 3e-6 (per GRPO-15.1 hackathon config)
+  - 50 max_steps (hackathon pilot — only if Gate G-0.8 passes)
   - G=2 (reduced from 4 — fewer zero-gradient steps)
-  - B200: local nvcc compile check (fast-fail syntax errors)
+  - H100: local nvcc compile check (fast-fail syntax errors)
   - A100 (Modal): execution correctness + speedup timing for reward
+  - Discrete reward {-1, 1, 2, 3} per CUDA Agent ablation
   - vLLM colocate mode for generation
 
 GRPO is experimental. SkyDiscover + SFT are primary hedges.
-See docs/GRPO_DEEP_DIVE.md GRPO-14 for full stacked architecture.
+See docs/GRPO_DEEP_DIVE.md GRPO-15.1 for hackathon configuration.
 """
 from __future__ import annotations
 
@@ -52,8 +53,8 @@ USE_BF16 = IS_LINUX
 
 # Multi-turn configuration
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "5"))
-MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "150"))
-# B200 local compile check for fast-fail; Modal A100 for performance reward.
+MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "50"))
+# H100 local compile check for fast-fail; Modal A100 for performance reward.
 # Set LOCAL_COMPILE_CHECK=0 to skip local compile pre-check (slower but simpler).
 LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_STAGE3_LOCAL_COMPILE", "1") == "1"
 
@@ -150,7 +151,7 @@ def main():
     )
 
     config = GRPOConfig(
-        learning_rate=5e-6,
+        learning_rate=3e-6,
         temperature=0.7,         # Lower temp for exploitation
         num_generations=2,
         max_prompt_length=4096,
@@ -178,6 +179,25 @@ def main():
         args=config,
         train_dataset=dataset,
     )
+
+    # Decision gate: if post-RFT model already strong, skip GRPO
+    skip_threshold_compile = float(os.getenv("KERNELFORGE_GATE_COMPILE", "0.95"))
+    skip_threshold_correct = float(os.getenv("KERNELFORGE_GATE_CORRECT", "0.85"))
+    if os.getenv("KERNELFORGE_DECISION_GATE", "0") == "1" and checkpoint_path:
+        print("Running decision gate evaluation...")
+        try:
+            from evaluation.eval_model import evaluate_checkpoint
+            gate_results = evaluate_checkpoint(checkpoint_path, num_problems=20)
+            compile_rate = gate_results.get("compile_rate", 0.0)
+            correct_rate = gate_results.get("correct_rate", 0.0)
+            print(f"  Gate results: compile={compile_rate:.1%}, correct={correct_rate:.1%}")
+            if compile_rate >= skip_threshold_compile and correct_rate >= skip_threshold_correct:
+                print(f"  DECISION GATE: compile={compile_rate:.1%} >= {skip_threshold_compile:.0%}, "
+                      f"correct={correct_rate:.1%} >= {skip_threshold_correct:.0%}")
+                print("  Skipping Stage 3 GRPO — model already strong. Use SkyDiscover for further gains.")
+                return
+        except Exception as e:
+            print(f"  Decision gate failed ({e}), proceeding with GRPO...")
 
     print("Starting Stage 3 training...")
     trainer.train()

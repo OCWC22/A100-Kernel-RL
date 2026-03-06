@@ -69,9 +69,9 @@ Returns TRL-compatible `rollout_func(prompt_ids, ...) -> dict` with keys:
 1. Generate response on H100 → `extract_cuda_code(text)` extracts ```cuda blocks
 2. **`_local_compile_check(code)`** — nvcc -arch=sm_80 -c syntax check (**IMPLEMENTED**, saves ~50% Modal cost)
 3. If compiles locally → `_evaluate_on_modal(code, task_code)` — **A100 execution:** routes to `evaluate_ops6k_kernel` (Ops-6K) or `evaluate_kernel` (WCC)
-4. `_compute_reward_from_result(result)` → log(speedup) + optional Nsight bonus
+4. `_compute_reward_from_result(result)` → discrete milestone {-1, 1, 2, 3}
 5. `_format_feedback(result, reward, turn)` → feedback text for next turn
-6. **Early exit** at reward >= 1.6 (log(5.0), i.e. 5x+ speedup)
+6. **Early exit** at reward >= 3.0 (beats torch.compile)
 
 ### `reward_from_env(completions, **kwargs) -> list[float]`
 Single-turn wrapper — extracts env_reward from rollout kwargs.
@@ -145,7 +145,7 @@ Implements SkyDiscover's algorithms natively (no external dependency).
 | TRLOO advantage scaling (N/(N-1)) | **DONE** | `custom_grpo_trainer.py` |
 | Local compile fast-path | **DONE** | `multi_turn_rollout.py:_local_compile_check()` |
 | Ops-6K evaluation | **DONE** | `modal_app.py:evaluate_ops6k_kernel()` |
-| Nsight bonus in reward | **DONE** | `reward.py:compute_reward()` (optional kwargs) |
+| Discrete reward {-1,1,2,3} | **DONE** | `reward.py:compute_reward()` |
 | Nsight lightweight profiling | **DONE** | `modal_app.py:evaluate_kernel()` (ptxas occupancy) |
 | doubleGraph A100 expert dataset | **DONE** | `datasets/doublegraph_*.jsonl` (192 entries) |
 | Real A100 patterns in SKILL.md | **DONE** | `skill_builder.py:_append_a100_patterns()` |
@@ -154,15 +154,10 @@ Implements SkyDiscover's algorithms natively (no external dependency).
 | Evaluator bridge (cascade eval) | **DONE** | `skydiscover_integration/evaluator.py` |
 | AdaEvolve multi-island search | **DONE** | `skydiscover_integration/adaevolve.py` |
 | EvoX self-evolving strategies | **DONE** | `skydiscover_integration/evox_strategies.py` |
-| MARS return-to-go credit | NOT YET (hackathon stretch goal) | `custom_grpo_loop.py` (GRPO-4) |
-| CPPO completion pruning | NOT YET (hackathon stretch goal) | (in custom_grpo_loop.py) (GRPO-11) |
-| MASPO soft trust region | NOT YET (future) | `maspo_loss.py` (GRPO-12) |
+| MARS return-to-go credit | **DROPPED** (degenerates with outcome rewards) | — (GRPO-4) |
+| CPPO completion pruning | **DROPPED** (harmful for exploration at G=2) | — (GRPO-11) |
+| MASPO soft trust region | DEFERRED (future research) | — (GRPO-12) |
 | ~~Transformation grammar~~ | DEFERRED | v2 (GRPO-13 line 1849) |
-
-## Files to Create
-
-- [ ] `custom_grpo_loop.py` — MARS return-to-go + CPPO pruning
-- [ ] `maspo_loss.py` — soft trust region loss term
 
 ## Abort Conditions
 

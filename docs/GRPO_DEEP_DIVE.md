@@ -25,7 +25,7 @@
 - **SFT warmup first**, then GRPO pilot, then search / best-of-N as a hedge
 - Model: Qwen3-Coder-30B-A3B-Instruct on H100
 - Eval: A100 80GB via Modal
-- G=2, short context, continuous reward, execution-based correctness, limited-step run with hard abort gates
+- G=2, short context, discrete milestone reward {-1, 1, 2, 3}, execution-based correctness, limited-step run with hard abort gates
 - Because under a hackathon budget, the highest-leverage thing is not elegant RL theory — it is working reward plumbing, working correctness checks, working timing on the actual target hardware, and enough model competence that RL steps are not mostly wasted.
 
 ### Not recommended as the primary hackathon path
@@ -53,7 +53,7 @@ This is tailored to **your exact use-case**: training Qwen3-Coder-30B-A3B-Instru
 
 You have an LLM (the **policy** π_θ) that, given a prompt x ("write CUDA kernel for this PyTorch op"), outputs a sequence y (the kernel code).
 
-You run the kernel through your environment → get a scalar **reward** r (e.g. -1 if doesn't compile, or log(speedup) if it does).
+You run the kernel through your environment → get a scalar **reward** r (e.g. -1 if doesn't compile, or +1/+2/+3 based on speedup milestones).
 
 Goal: update θ so the model generates higher-reward kernels more often.
 
@@ -96,18 +96,18 @@ where
 
 Then plug into clipped PPO-style surrogate loss (same as normal PPO, just replace advantage).
 
-**Numerical example** (your kernel world):
+**Numerical example** (your kernel world, discrete milestone rewards {-1, 1, 2, 3}):
 ```
 Prompt: "fuse GEMM + bias + ReLU"
-- Completion 1: compiles, 1.1× vs torch.compile → r=0.095 (log(1.1))
-- Completion 2: compiles, 1.8× → r=0.588
-- Completion 3: doesn't compile → r=-1
-- Completion 4: compiles, 1.05× → r=0.049
+- Completion 1: compiles, correct, no speedup      → r=+1
+- Completion 2: compiles, correct, beats eager+compile → r=+3
+- Completion 3: doesn't compile                     → r=-1
+- Completion 4: compiles, correct, beats eager only → r=+2
 
-μ ≈ -0.067, σ ≈ 0.68 → advantages ≈ [0.24, 0.96, -1.37, 0.17]
+μ = 1.25, σ ≈ 1.71 → advantages ≈ [-0.15, +1.02, -1.32, +0.44]
 ```
 
-The model strongly reinforces completion 2, mildly reinforces 1 & 4, strongly discourages 3.
+The model strongly reinforces completion 2, mildly reinforces 4, mildly discourages 1, strongly discourages 3.
 
 This worked amazingly for math/code reasoning in 2025 because it's cheap and stable.
 
@@ -157,11 +157,11 @@ A_i^TRLOO = (G/(G-1)) × (r_i - μ)
 
 This is **unbiased**: E[gradient] = true ∇J.
 
-**Numerical example again** (same numbers):
+**Numerical example again** (same numbers, discrete milestone rewards):
 ```
-μ = -0.067
+μ = 1.25
 TRLOO multiplier = 4/3 ≈ 1.333
-Advantages become: [0.32, 1.28, -1.83, 0.23] → much stronger signal for the good kernel, stronger penalty for the bad one.
+Advantages become: [-0.20, +1.36, -1.76, +0.59] → much stronger signal for the good kernel, stronger penalty for the bad one.
 ```
 
 In code (your reward_trloo_nsight.py):
@@ -191,9 +191,11 @@ G_{i,t} = R_{i,t} + R_{i,t+1} + ... + R_{i,T}    (γ=1)
 
 Then compute TRLOO advantage on these **G_{i,t}** instead of raw R.
 
-In your code:
+In your code (MARS is DROPPED — this is retained for reference only):
 ```python
-r = log(speedup) + 0.3*occupancy + 0.2*coalescing   # current turn reward
+# MARS was designed for per-turn rewards. KernelForge uses outcome-only
+# rewards, making return_to_go[t] = r_final for all t. MARS = no-op here.
+r = discrete_reward  # {-1, 1, 2, 3} from CUDA Agent Equation 1
 turn = kwargs.get("turn", 0)
 r = r * (1.0 ** turn)   # simple return-to-go weighting (future turns fully count)
 ```
@@ -209,11 +211,11 @@ That means:
 - search sometimes gives better demo value per dollar than pure RL,
 - SFT-first is the right move.
 
-**Stacked techniques that help (when implemented):**
-- **Base reward:** continuous log(speedup) → solves "lazy optimization" (no more discrete bins).
+**Stacked techniques that help (implemented):**
+- **Base reward:** discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1) — clear thresholds for compile, correct, speedup vs eager, speedup vs compile.
 - **TRLOO scaling** → removes self-inclusion bias (50% gradient shrinkage at G=2).
-- **MARS return-to-go** → proper multi-turn credit (**planned, not fully wired**).
-- **CPPO cheap filter** before Modal → only expensive evals on promising kernels (**planned, not fully wired**).
+- ~~**MARS return-to-go**~~ → DROPPED (no benefit with outcome-only rewards — see GRPO-4).
+- ~~**CPPO cheap filter**~~ → DROPPED (no benefit post-SFT at G=2 — see GRPO-11).
 
 **Operational conclusion:** because budget is tight, start with SFT-first + shallow GRPO. Because evaluation is expensive, correctness and reward plumbing matter more than fancy RL theory. Because we target a hackathon, working feedback loops beat elegant but unrun architecture.
 
@@ -223,8 +225,8 @@ That means:
 |-----------------|--------------------------------------------|-------|--------------------|----------------|--------------------|
 | PPO + critic    | GAE from value net                         | No    | Yes (GAE)          | High           | Too expensive      |
 | Vanilla GRPO    | (r_i - μ)/σ                                | Yes (25% loss) | Weak               | Low            | Dropped            |
-| TRLOO-GRPO      | [G/(G-1)] × (r_i - μ)                      | No    | With MARS          | Low            | Core (your code)   |
-| + MARS          | TRLOO on return-to-go G_{i,t}              | No    | Excellent          | Low            | Your multi-turn    |
+| TRLOO-GRPO      | [G/(G-1)] × (r_i - μ)                      | No    | N/A (outcome-only) | Low            | Core (your code)   |
+| + MARS          | TRLOO on return-to-go G_{i,t}              | No    | Excellent          | Low            | DROPPED (no benefit with outcome rewards) |
 
 You now have **complete understanding**. The single line `* (N/(N-1))` in your reward function is the mathematical cure for the exact disease that killed early kernel RL attempts in 2026.
 
@@ -237,7 +239,7 @@ This is the **precise mathematics** behind the fix you are pasting tonight. Ever
 ### 1. Original GRPO (DeepSeekMath, arXiv [2402.03300](https://arxiv.org/abs/2402.03300))
 
 For each prompt (one PyTorch op + task_code), sample **G** completions (your G=4).  
-Compute scalar reward **r_i** for each completion i (in your case: Nsight-based continuous reward).
+Compute scalar reward **r_i** for each completion i (in your case: discrete milestone {-1, 1, 2, 3} from CUDA Agent Equation 1).
 
 **Advantage estimator** (outcome supervision variant used in kernel RL):
 ```
@@ -320,14 +322,13 @@ G_{i,t} = Σ_{t'=t}^T R_{i,t'}    (γ=1)
 
 Then apply TRLOO on top of these G_{i,t}.
 
-This is exactly what your `cuda_kernel_reward` does:
+~~This is exactly what your `cuda_kernel_reward` does~~ (MARS is DROPPED — see GRPO-4):
 ```python
-# MARS step
-r = log(speedup) + 0.3*occupancy + 0.2*coalescing
-turn = kwargs.get("turn", 0)
-r = r * (1.0 ** turn)   # return-to-go scaling (future turns count fully)
+# MARS step — NOT USED (outcome-only rewards make this a no-op)
+# r = log(speedup) + 0.3*occupancy + 0.2*coalescing  # OLD continuous reward
+# KernelForge now uses discrete milestone {-1, 1, 2, 3}
 
-# Then TRLOO scaling
+# TRLOO scaling — IMPLEMENTED (this is what we actually use)
 unbiased = (r_tensor - mean) * (N / (N-1))
 ```
 
@@ -352,7 +353,7 @@ That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 
 ### 6. Why This Works for the Hackathon Stack (H100 + Modal A100 + CUDA-Agent)
 
-- Rewards come from **CUDA events timing on Modal A100** + execution-based correctness (continuous signal → no lazy optimization)
+- Rewards come from **CUDA events timing on Modal A100** + execution-based correctness (discrete milestone {-1, 1, 2, 3})
 - G=2 keeps eval budget low, TRLOO N/(N-1) fixes the bias
 - Hackathon config: Qwen3-Coder-30B-A3B-Instruct on H100 gen + A100 eval
 - **Expert demonstrations**: 192 A100 kernels from doubleGraph as SFT data (`doublegraph_sft.jsonl`) + combined RL prompts (`combined_kernelforge.jsonl`)
@@ -365,10 +366,10 @@ That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 |---------------|--------------------------------------------|------------------|----------------------|
 | Vanilla GRPO  | G_i - mean(G)                              | (1-1/N)          | No (dropped)        |
 | TRLOO         | [N/(N-1)] (G_i - mean(G))                  | None             | Yes (core)          |
-| + MARS        | return-to-go G_{i,t} then TRLOO            | None             | Yes                 |
-| + Nsight PR   | log(speedup) + weighted occupancy etc.     | —                | Yes (reward base)   |
+| + MARS        | return-to-go G_{i,t} then TRLOO            | None             | DROPPED (no benefit with outcome rewards) |
+| + Nsight PR   | optional Nsight bonus (not in primary reward) | —             | Future enhancement  |
 
-**Bottom line:** TRLOO-GRPO is **not** a new algorithm — it is vanilla GRPO with one mathematically proven 1-line correction that removes the exact bias Dr. Kernel identified in Feb 2026. Combined with SFT warmup and continuous rewards, it is a promising hackathon-fit stack for validating real learning signal under budget.
+**Bottom line:** TRLOO-GRPO is **not** a new algorithm — it is vanilla GRPO with one mathematically proven 1-line correction that removes the exact bias Dr. Kernel identified in Feb 2026. Combined with SFT warmup and discrete milestone rewards {-1, 1, 2, 3}, it is the hackathon-fit stack for validating real learning signal under budget.
 
 ---
 
@@ -651,11 +652,13 @@ def cuda_kernel_reward(prompts: list[str], completions: list[str],
     3. Compile with nvcc -arch=sm_80 in subprocess (crash isolation)
     4. Verify correctness against PyTorch reference
     5. Profile vs torch.compile
-    6. Return continuous reward: log(speedup) + Nsight bonus
+    6. Return discrete milestone reward {-1, 1, 2, 3}
 
-    Reward formula (replaces CUDA Agent's discrete Equation 1):
-    r = -1.0  if compilation fails OR correctness fails
-    r = log(speedup_vs_eager) + 0.4*occupancy + 0.3*mem_coalescing + 0.2*warp_efficiency
+    Reward formula (CUDA Agent Equation 1):
+    r = -1  if compilation fails OR correctness fails
+    r = +1  if correct but no speedup (speedup <= 1.05x)
+    r = +2  if >5% faster than torch.eager
+    r = +3  if >5% faster than BOTH torch.eager AND torch.compile
     See openenv_env/reward.py for implementation.
     """
     rewards = []
@@ -1071,8 +1074,8 @@ def run_stage2(model, tokenizer, trajectories: list, output_dir: str):
 # STAGE 3: GRPO + CURRICULUM
 # Goal: Learn optimization strategies through progressive difficulty
 # Dataset: 200 curated tasks across 4 difficulty phases
-# Turns: 5 (deeper multi-turn with profiling feedback)
-# Steps: 200
+# Turns: 3-5 (hackathon; 20 is future target)
+# Steps: 50 (hackathon pilot; 150 is future target)
 # ============================================================
 
 def run_stage3(model, tokenizer, output_dir: str):
@@ -1099,8 +1102,8 @@ def run_stage3(model, tokenizer, output_dir: str):
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         num_train_epochs=1,
-        max_steps=200,
-        learning_rate=3e-6,  # Slightly higher than Stage 1 — matches PRD table
+        max_steps=50,                # Hackathon pilot (future target: 150)
+        learning_rate=3e-6,  # Matches PRD table and GRPO-15.1
         
         bf16=True,
         gradient_checkpointing=True,
@@ -1232,6 +1235,12 @@ if __name__ == "__main__":
 ---
 
 ## GRPO-4: MARS+TRLOO Credit Assignment (Multi-Turn Extension)
+
+### STATUS: DROPPED
+
+**MARS computes cumulative returns on per-turn rewards. KernelForge uses outcome-only rewards (reward at episode end). With outcome rewards, `return_to_go[t] = r_final` for all t, making MARS identical to standard trajectory-level GRPO. Per CUDA Agent paper analysis: MARS provides zero benefit here.**
+
+The code below is retained for reference only. Do not implement or present MARS as part of the hackathon stack.
 
 ### Why Standard GRPO Fails on Multi-Turn
 
@@ -1433,16 +1442,16 @@ def multi_turn_hybrid_rollout(prompts, trainer):
 | **MARS+TRLOO** | Turn (cumulative, leave-one-out) | Low | Excellent | **Best** |
 | GAE(0.95,0.95) + critic | Token | Medium | Good (needs critic) | Too heavy |
 
-**Bottom line:** MARS+TRLOO is the single highest-leverage addition after hybrid eval. ~50-line change in `multi_turn_rollout.py`. Makes the reward curve jump in the first 20-30 steps of Stage 3.
+**Bottom line (OUTDATED — see STATUS: DROPPED above):** MARS provides zero benefit with outcome-only rewards. TRLOO alone is the implemented credit assignment method. MARS code above is retained for reference only.
 
-> **Hackathon implementation status:** TRLOO advantage scaling is **IMPLEMENTED** in `training/custom_grpo_trainer.py`. MARS return-to-go credit assignment (`training/custom_grpo_loop.py`) is **NOT YET implemented** (~50 LOC). For the hackathon, standard TRLOO is the floor. MARS is a stretch goal. Do not present MARS+TRLOO as a validated pair unless both are wired and tested end-to-end.
+> **Implementation status:** TRLOO advantage scaling is **IMPLEMENTED** in `training/custom_grpo_trainer.py`. MARS is **DROPPED** (not "stretch goal") because KernelForge uses outcome-only rewards, making MARS mathematically identical to trajectory-level GRPO. Do not implement or present MARS as part of the stack.
 
 ---
 
 ### Gate G-0.8: 5-Step GRPO Sanity Check (Thu Night)
 
 **When:** Thursday night, after P0 eval pipeline is working.
-**What:** Run 5 GRPO steps with the new continuous reward function + TRLOO post-process.
+**What:** Run 5 GRPO steps with the discrete milestone reward {-1, 1, 2, 3} + TRLOO post-process.
 
 **Pass criteria:**
 1. Non-zero gradients in at least 4/5 steps
@@ -1654,14 +1663,14 @@ HACKATHON CONFIGURATION (March 5, 2026):
   G = 2 (num_generations)
   β = 0.0 (no KL penalty, DAPO style)
   ε = 0.2 (clip range)
-  Rewards = continuous log(speedup) + optional Nsight bonus
+  Rewards = discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
   Temperature = 1.0 (Stage 1) → 0.7 (Stage 3)
   Learning rate = 2e-6 (Stage 1) → 3e-6 (Stage 3)
   LoRA rank = 16, target = qkvo + gate/up/down
-  Credit = TRLOO (IMPLEMENTED) + MARS per-turn (stretch goal, NOT YET)
+  Credit = TRLOO only (MARS DROPPED — see GRPO-4)
   Eval = Hybrid: local nvcc+PAC early turns, Modal A100 final turn (GRPO-10)
-  Loss = standard clip (MASPO soft trust is future/optional, GRPO-12)
-  Pruning = CPPO (stretch goal, NOT YET, GRPO-11)
+  Loss = standard clip (MASPO DEFERRED — see GRPO-12)
+  Pruning = CPPO DROPPED (see GRPO-11)
 
 H100 MEMORY:
   Coder-30B-A3B 4-bit: ~30-34 GB total → ~46-50 GB free (PRIMARY)
@@ -1688,14 +1697,13 @@ ABORT CONDITIONS:
 
 ### The Problem (Section 6.0.2 — Fundamental Failure #2)
 
-Our **original** reward function had discrete levels {-1, 1, 2, 3}. Without profiling, only {-1, 1} were reachable. Even WITH profiling, the 4-level scheme lost critical signal:
-- A 1.06x kernel (barely r=+2) gets the same reward as a 5x kernel (also r=+2)
-- No incentive to optimize beyond the threshold
-- CUDABench (arXiv 2603.02236): "mismatch between high compilation success and low functional correctness"
+Our reward function uses discrete levels {-1, 1, 2, 3}. Without profiling, only {-1, 1} were reachable. With profiling wired, all four levels are reachable. The discrete scheme has known limitations (a 1.06x kernel gets the same r=+2 as a 5x kernel), but provides clear milestone signal that is robust to timing noise.
 
-### The Fix: Continuous Reward from Nsight Compute Metrics
+CUDABench (arXiv 2603.02236): "mismatch between high compilation success and low functional correctness" -- this is why correctness gating (r=-1 for wrong output) is non-negotiable.
 
-Instead of only measuring wall-time speedup, extract GPU hardware metrics that explain **why** a kernel is fast or slow:
+### Nsight Compute Metrics (Optional Enhancement, Not Current Reward)
+
+Nsight metrics can provide additional diagnostic signal. They are currently available as optional kwargs in `compute_reward()` but are **not** part of the primary discrete reward. Future work may use them for a continuous reward variant:
 
 ```bash
 # ncu command for Modal A100 endpoint
@@ -1721,11 +1729,9 @@ ncu --metrics \
 }
 ```
 
-**Reward formula (continuous log(speedup) + Nsight — replaces discrete {-1,1,2,3}):**
+**Reward formula (discrete milestone {-1, 1, 2, 3} — CUDA Agent Equation 1):**
 
 ```python
-import math
-
 def compute_reward(
     compiled: bool,
     correct: bool,
@@ -1735,25 +1741,22 @@ def compute_reward(
     mem_coalescing: float | None = None,
     warp_efficiency: float | None = None,
 ) -> float:
-    """Continuous reward: log(speedup) + Nsight bonus.
+    """Discrete milestone reward per CUDA Agent Equation 1.
 
-    Fix 5: Replaces discrete {-1, 1, 2, 3} with continuous signal.
-    log(1.0)=0, log(2.0)=0.69, log(5.0)=1.61 — proportional gradient.
+    -1: compilation fails OR correctness fails
+    +1: correct but no speedup (speedup <= 1.05x)
+    +2: >5% faster than torch.eager
+    +3: >5% faster than BOTH torch.eager AND torch.compile
     """
     if not compiled or not correct:
         return -1.0
 
-    # Continuous speedup signal (log scale)
-    base = math.log(max(speedup_vs_eager, 0.1))
-
-    # Nsight bonus when profiling metrics available
-    if occupancy is not None:
-        occ = max(0.0, min(1.0, occupancy))
-        mem = max(0.0, min(1.0, mem_coalescing or 0.0))
-        warp = max(0.0, min(1.0, warp_efficiency or 0.0))
-        base += 0.4 * occ + 0.3 * mem + 0.2 * warp
-
-    return base
+    if speedup_vs_compile > 1.05:
+        return 3.0
+    elif speedup_vs_eager > 1.05:
+        return 2.0
+    else:
+        return 1.0
 
 
 def trloo_post_process(advantages: list[float], n: int) -> list[float]:
@@ -1769,9 +1772,9 @@ def trloo_post_process(advantages: list[float], n: int) -> list[float]:
     return [a * scale for a in advantages]
 ```
 
-**Why this matters for learning:** The continuous log(speedup) signal gives proportional gradients — a 3x kernel gets more reward than 1.1x, instead of both landing in the same discrete bucket. The Nsight bonus provides gradient signal from occupancy even when two kernels have similar wall-time speedups. TRLOO post-processing is a drop-in fix that corrects the 25% gradient shrinkage without requiring a custom training loop.
+**Why this matters for learning:** The discrete milestone reward {-1, 1, 2, 3} provides clear threshold-based signal that is robust to timing noise on A100. The gap between levels (especially -1 to +1, which gates on correctness) creates strong learning signal. TRLOO post-processing is a drop-in fix that corrects the 25% gradient shrinkage without requiring a custom training loop.
 
-**Files:** `openenv_env/reward.py` (rewritten with continuous reward + TRLOO), `modal_app.py` (add `_ncu_profile()` + wire into `evaluate_kernel()`)
+**Files:** `openenv_env/reward.py` (discrete milestone reward + TRLOO), `modal_app.py` (compile + verify + benchmark pipeline)
 
 ---
 
@@ -1825,14 +1828,16 @@ def _format_feedback(result: dict) -> str:
 
 ## GRPO-11: CPPO Completion Pruning
 
+### STATUS: DROPPED
+
+**After SFT on expert kernels, the model generates syntactically valid CUDA by default. Heuristic pre-filtering (checking for `__shared__`, `float4`) provides no value. During GRPO, pruning removes exploration signal needed for TRLOO group statistics.**
+
+With G=2, pruning one candidate leaves G=1 which produces zero advantage variance. CPPO was designed for G=4+ settings where most candidates are garbage. Post-SFT at G=2, both candidates typically compile, making structural pre-filtering pointless.
+
+The code below is retained for reference only. Do not implement.
+
 **Paper:** arXiv [2503.22342](https://arxiv.org/abs/2503.22342)
 **GitHub:** https://github.com/lzhxmu/CPPO
-
-### The Problem (Section 6.0.3 — Fundamental Failure #3)
-
-G completions × full Modal eval = expensive. Most completions are garbage (especially early in training). With G=4 (original design), we wasted 75% of eval budget on kernels that obviously won't compile. With G=2 (current), CPPO still helps by filtering the weaker candidate.
-
-> **Hackathon status:** CPPO is **NOT YET implemented**. This is a stretch goal. The structural filter `cheap_cuda_score()` below is the design — implement only if time permits after core pipeline works.
 
 ### The Fix: Cheap Structural Filter + Prune Bottom Completions
 
@@ -1870,11 +1875,15 @@ After computing advantages, prune completions with |advantage| < threshold (typi
 
 ## GRPO-12: MASPO Soft Trust Region
 
+### STATUS: DEFERRED (future research)
+
+**Not planned for hackathon or near-term work.** Standard PPO clip is sufficient for the current pipeline. MASPO would only matter at scale (150+ steps, 20 turns) where clip-boundary oscillation becomes a measurable bottleneck. Revisit if Stage 3 training shows ratio-clipping artifacts in W&B logs.
+
 **Paper:** arXiv [2602.17550](https://arxiv.org/abs/2602.17550)
 
 ### The Problem
 
-PPO/GRPO's hard clip at ratio ∈ [0.8, 1.2] creates a **gradient cliff** at the boundary. The gradient jumps discontinuously from (advantage × d_ratio) to 0 exactly at the clip boundary. This causes:
+PPO/GRPO's hard clip at ratio in [0.8, 1.2] creates a gradient discontinuity at the boundary. This causes:
 - Oscillation at the clip boundary
 - Loss of gradient signal for rare high-reward optimizations (which tend to have large policy changes)
 
@@ -1906,7 +1915,7 @@ def maspo_policy_loss(log_probs, old_log_probs, advantages, sigma=0.2):
 - At ratio=1.5: gate=0.11 (strong dampening for large changes)
 - Smooth gradients everywhere → better exploration on sparse rewards
 
-**Impact:** +2-3% over GRPO on coding/math (MASPO paper ablations). Less collapse on rare high-reward optimizations — critical for continuous reward with sparse high-speedup events.
+**Impact:** +2-3% over GRPO on coding/math (MASPO paper ablations). Less collapse on rare high-reward optimizations — potentially useful with discrete rewards where high-speedup events (r=+3) are sparse.
 
 **Integration:** Monkey-patch `GRPOTrainer.compute_loss()` in `training/stage3_grpo.py`, or create `training/maspo_loss.py` as a standalone module. If TRL's API is too opaque for monkey-patching, use standard clip (this is a nice-to-have, not critical).
 
@@ -2047,16 +2056,23 @@ def parse_transforms(text: str) -> list[tuple[str, str]]:
 
 ```
 For each GRPO step:
-  1. SortedRL: Sort prompt queue by estimated completion length
-  2. Generate: vLLM produces G=2 candidates (transform mode after Stage 1)
-  3. CPPO filter: Score all candidates cheaply, keep top-2
-  4. Hybrid eval:
-     - Turns 1-2: local nvcc + 3-graph PAC verify (~5s each)
-     - Turn 3 (if needed): batch Modal A100 + ncu metrics (~30-90s)
-     - Early stop if r >= 2.0
-  5. MARS+TRLOO: Compute per-turn cumulative returns, leave-one-out baseline
-  6. MASPO loss: Soft trust region (or standard clip if MASPO is flaky)
-  7. Update: Backprop through high-signal completions only
+
+  IMPLEMENTED:
+  1. Generate: vLLM produces G=2 candidates with SKILL.md context
+  2. Hybrid eval:
+     - Local nvcc compile check (~5s)
+     - Modal A100 eval for compiling kernels (~30-90s)
+     - Early stop if reward >= 3
+  3. TRLOO: Leave-one-out advantage scaling N/(N-1)
+  4. Standard clip loss (PPO-style ε=0.2)
+  5. Update: Backprop through LoRA adapters
+
+  UNBUILT (dropped or deferred):
+  - SortedRL: Sort prompt queue by estimated completion length — NOT IMPLEMENTED
+  - CPPO filter: Score candidates cheaply, prune bottom — DROPPED (see GRPO-11)
+  - MARS per-turn credit: Cumulative returns on per-turn rewards — DROPPED (see GRPO-4)
+  - MASPO loss: Soft trust region — DEFERRED (see GRPO-12)
+  - Transform mode: Structured edits instead of free-form — DEFERRED to v2 (GRPO-13)
 ```
 
 ### Stage Configurations (Revised)
@@ -2070,7 +2086,7 @@ STAGE 1 — WARM-UP (Qwen3-Coder-30B-A3B-Instruct on H100):
   LR: 2e-6
   Action: Free-form generation (learn to compile first)
   Eval: Hybrid (local turns 1-2, Modal turn 3)
-  Credit: TRLOO (MARS is stretch goal)
+  Credit: TRLOO only (MARS DROPPED — see GRPO-4)
   Goal: Compilation rate 50% → 85%
 
 STAGE 2 — RFT:
@@ -2087,9 +2103,9 @@ STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H100) — HACKATHON CONF
   Context: 8,192 tokens (H100: ~46GB free — ample headroom)
   Action: Free-form generation with SKILL.md context (7 real A100 patterns via skill_builder.py)
   Eval: Hybrid — local nvcc early turns, Modal A100 final turn
-  Credit: TRLOO (MARS per-turn credit is stretch goal, NOT YET)
-  Reward: Continuous log(speedup) + optional Nsight bonus
-  Loss: Standard clip (MASPO is future/optional)
+  Credit: TRLOO only (MARS DROPPED — see GRPO-4; CPPO DROPPED — see GRPO-11)
+  Reward: Discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
+  Loss: Standard clip (MASPO DEFERRED — see GRPO-12)
   Inference: Best-of-N candidates per problem + SkyDiscover hedge
   Goal: Validate real learning signal, demonstrate candidate improvement
 ```
@@ -2099,7 +2115,7 @@ STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H100) — HACKATHON CONF
 | File | LOC | Status | Purpose |
 |------|-----|--------|---------|
 | `training/custom_grpo_trainer.py` | ~40 | **DONE** | TRLOOGRPOTrainer — N/(N-1) advantage scaling |
-| `openenv_env/reward.py` | ~60 | **DONE** | Continuous log(speedup) + Nsight bonus + TRLOO post-process |
+| `openenv_env/reward.py` | ~60 | **DONE** | Discrete milestone {-1,1,2,3} + TRLOO post-process |
 | `training/multi_turn_rollout.py` | ~160 | **DONE** | Multi-turn rollout + local compile fast-path + Modal eval |
 | `openenv_env/skill_builder.py` update | ~100 | **DONE** | `_append_a100_patterns()` — 7 real expert patterns from doubleGraph |
 | `datasets/extract_doublegraph_a100.py` | ~550 | **DONE** | Harvest 192 A100 kernels → 3 TRL datasets |
@@ -2109,8 +2125,8 @@ STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H100) — HACKATHON CONF
 | `training/curriculum.py` update | ~80 | **DONE** | 5 topology-aware graph problems with graph_properties |
 | `openenv_env/kernel_forge_env.py` update | ~10 | **DONE** | graph_properties + topology_type in observations |
 | `modal_app.py` update | ~30 | **DONE** | Nsight lightweight profiling (ptxas occupancy) |
-| `training/custom_grpo_loop.py` | ~100 | NOT YET | MARS return-to-go + CPPO pruning |
-| `training/maspo_loss.py` | ~50 | NOT YET | Soft trust region loss term |
+| `training/custom_grpo_loop.py` | ~100 | **DROPPED** | MARS return-to-go (no benefit with outcome rewards) + CPPO pruning (no benefit post-SFT at G=2) |
+| `training/maspo_loss.py` | ~50 | **DEFERRED** | Soft trust region loss term (future research) |
 
 **Dropped from v1:** `openenv_env/transform_grammar.py` (~250 LOC) — transformation grammar deferred to v2. Replaced by 7 real A100 patterns in SKILL.md.
 
@@ -2131,7 +2147,7 @@ Training data:
 
 Projected training-time results (pass@1) — FUTURE TARGET, NOT PROVEN:
   Compilation rate: 93-96% (projected, if Stage 1 warmup + SFT on 192 real expert demos)
-  Functional correctness: 80-88% (projected, requires MARS + continuous reward)
+  Functional correctness: 80-88% (SPECULATIVE — depends on unimplemented components; MARS DROPPED)
   Geo-mean speedup: 1.8-2.1× (projected, on combined dataset + WCC + graph algorithms)
   A100 patterns discovered: 12-18 (projected — float4, L2 pinning, shuffles, tiling, etc.)
 
@@ -2141,7 +2157,7 @@ Projected inference-time results (best-of-8 + SkyDiscover) — FUTURE TARGET:
   Geo-mean speedup: 2.0-2.3× (projected, CUDA-Agent benchmark: 2.11×)
 
 Cost & timeline:
-  Total evals: ~1,200 Modal calls (CPPO saves ~40%)
+  Total evals: ~2,000 Modal calls (CPPO savings no longer assumed — DROPPED)
   Wall-clock training: ~14 hours (Stage 1: 3.5h + Stage 2: 0.5h + Stage 3: 10h)
   SkyDiscover parallel: evolutionary search on doubleGraph seeds (~2h)
   Total project time: 12-16 hours coding + 14 hours training
@@ -2149,15 +2165,16 @@ Cost & timeline:
   vs CUDA-Agent: ~$5,000-10,000+ (30-60× cheaper)
 
 Why these projections are plausible (research basis):
-  - TRLOO: unbiased gradients (Dr. Kernel arXiv 2602.05885, +72% Fast@1.2×) — IMPLEMENTED
-  - MARS: +23% return in multi-turn (MARSHAL paper) — NOT YET IMPLEMENTED
-  - Continuous reward: proportional gradient signal vs discrete — IMPLEMENTED
-  - CPPO: fewer Modal calls + cleaner gradients — NOT YET IMPLEMENTED
+  - TRLOO: unbiased gradients (Dr. Kernel arXiv 2602.05885, +72% Fast@1.2x) — IMPLEMENTED
+  - MARS: DROPPED (no benefit with outcome-only rewards — see GRPO-4)
+  - Discrete milestone reward {-1, 1, 2, 3}: robust threshold-based signal — IMPLEMENTED
+  - CPPO: DROPPED (no benefit post-SFT at G=2 — see GRPO-11)
   - 192 expert demos: real A100 patterns as SFT anchor — IMPLEMENTED
   - 7 SKILL.md patterns: concrete optimization strategies in every prompt — IMPLEMENTED
   - Best-of-N inference + SkyDiscover hedge — IMPLEMENTED
   NOTE: These projections assume full 150-step, 20-turn, B200 scale-up.
-  The hackathon will test the core loop at smaller scale.
+  SPECULATIVE — the per-sample efficiency claims assumed MARS+CPPO (both DROPPED).
+  The hackathon will test the core loop at smaller scale with TRLOO only.
 ```
 
 ### Why This Architecture Has Potential (Future Targets)
@@ -2165,17 +2182,17 @@ Why these projections are plausible (research basis):
 | Original PRD Failure | Stacked Fix | Evidence |
 |---------------------|-------------|---------|
 | GRPO bias (50% gradient shrinkage at G=2) | TRLOO N/(N-1) leave-one-out | Dr. Kernel: unbiased, +72% Fast@1.2× |
-| Flat credit (all turns same reward) | MARS per-turn cumulative returns | MARSHAL: +23% return; correctness gate gets 3× more credit |
-| Discrete {-1,1,2,3} (lazy optimization) | Nsight continuous reward | Dr. Kernel: +3.6× Fast@1.2x from reward design |
-| 25× fewer RL samples than CUDA Agent | 12-25× per-sample efficiency + 192 expert demos | Effective signal: 315K vs 153K (2.05× MORE) |
+| Flat credit (all turns same reward) | ~~MARS per-turn cumulative returns~~ DROPPED (no benefit with outcome-only rewards) | MARSHAL: +23% return — but requires per-turn rewards, which KernelForge does not use |
+| Discrete {-1,1,2,3} (limited granularity) | Discrete milestone {-1, 1, 2, 3} with clear correctness gate | CUDA Agent Equation 1; robust to timing noise |
+| 25x fewer RL samples than CUDA Agent | TRLOO correction + 192 expert demos. **SPECULATIVE -- depends on unimplemented components:** original 12-25x claim required MARS+CPPO (both DROPPED) | TRLOO alone: ~1.3x correction at G=2 |
 | No real A100 patterns in training data | 192 doubleGraph kernels + 7 SKILL.md patterns | Production code: 84K+ lines, 3.6× avg speedup |
 | Generic prompts (no topology awareness) | Topology-aware curriculum (5 graph tasks) | Power-law, dense-community, sparse-islands prompts |
 | No evolutionary search hedge | AdaEvolve multi-island UCB + EvoX strategies | 4 islands, 5 seed kernels, cascade eval on Modal A100 |
-| G=4 zero-gradient steps | G=2 + Nsight continuous signal | Continuous reward → always non-zero std |
+| G=4 zero-gradient steps | G=2 + discrete milestone {-1,1,2,3} | 4-level reward → usually non-zero std when compile rates differ |
 | Only 10 steps, 3 turns (demo) | 150 steps, 20 turns (match config) | Multi-turn = #1 CUDA-Agent ablation factor |
 | Single candidate per problem | Best-of-8 inference + AdaEvolve | pass@8 ≈ 99.99%; max speedup selection |
 
-**Bottom line:** This architecture combines multiple research-backed improvements (TRLOO, continuous reward, expert demos, topology-aware curriculum, evolutionary search). The hackathon will validate the core feedback loop at small scale. Full benchmark comparison against CUDA-Agent is a future research target, not a hackathon claim.
+**Bottom line:** This architecture combines TRLOO (implemented), discrete milestone rewards (implemented), expert demos, topology-aware curriculum, and evolutionary search. MARS and CPPO are DROPPED. MASPO is DEFERRED. The hackathon will validate the core feedback loop at small scale. Full benchmark comparison against CUDA-Agent is a future research target, not a hackathon claim.
 
 ---
 
@@ -2195,8 +2212,8 @@ HACKATHON STAGE 3 — GRPO PILOT
   LR: 3e-6
   Context: 8,192 tokens (H100: ~46GB free)
   Eval: Hybrid — local nvcc early turns, Modal A100 final turn
-  Credit: TRLOO (IMPLEMENTED); MARS (stretch goal)
-  Reward: Continuous log(speedup) + optional Nsight bonus
+  Credit: TRLOO only (MARS DROPPED — see GRPO-4)
+  Reward: Discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
   Loss: Standard clip
   Cost: ~$30-50 (H100 training) + ~$20-40 (A100 eval)
 
@@ -2242,10 +2259,10 @@ FUTURE: STAGE 3 — GRPO + CURRICULUM (SCALE-UP TARGET)
   LR: 5e-6
   Context: 32,768 tokens (B200: 92GB free - 40GB KV = 52GB headroom)
   Eval: Hybrid — local nvcc turns 1-5, Modal A100 turns 6+
-  Credit: MARS per-turn cumulative returns + TRLOO leave-one-out N/(N-1)
-  Reward: Continuous log(speedup) + Nsight bonus (top-k only)
-  CPPO: cheap_cuda_score() filter before Modal eval (~40% savings)
-  Loss: MASPO soft trust σ=0.2 (or standard clip)
+  Credit: TRLOO leave-one-out N/(N-1) (MARS would require per-turn rewards — currently DROPPED)
+  Reward: Discrete milestone {-1, 1, 2, 3} (future: consider continuous log(speedup) + Nsight bonus)
+  CPPO: DROPPED for now (would require G>2 to be useful; re-evaluate if G increases)
+  Loss: Standard clip (MASPO DEFERRED — consider if clip-boundary artifacts appear)
   Inference: Best-of-8 per problem + SkyDiscover for Level 3
   Cost: ~10 hrs B200 ($62.50) + ~10 hrs A100 eval ($25.00) = $87.50
 ```
@@ -2263,15 +2280,14 @@ FUTURE: STAGE 3 — GRPO + CURRICULUM (SCALE-UP TARGET)
 
 ### Multi-Turn Budget Analysis
 
-With 20 turns, hybrid eval, and CPPO filtering:
+With 20 turns and hybrid eval (CPPO DROPPED — no filtering savings):
 
 ```
 Per GRPO step (G=2, max_turns=20):
   Turn 1-5 per candidate: local nvcc compile check (~5s each) = 50s total
   Turn 6-20 per candidate: Modal A100 eval (~30s each) = 15 turns × 2 × 30s = 900s
-  Average turns per candidate: ~12 (early exit at reward >= 1.6)
-  CPPO filtering: ~40% of Modal calls saved
-  Average wall-clock per step: ~4 minutes (after CPPO savings)
+  Average turns per candidate: ~12 (early exit at reward >= 3)
+  Average wall-clock per step: ~6 minutes (no CPPO filtering)
 
 150 steps × 4 min = ~600 min = ~10 hours
   B200 time: 10 hrs × $6.25/hr = $62.50
@@ -2298,15 +2314,17 @@ Full pipeline:
 
 ### Projected Data Efficiency Comparison (Future Scale-Up)
 
+> **SPECULATIVE -- depends on unimplemented components.** The per-sample efficiency projection assumed MARS+CPPO, both of which are now DROPPED. Only TRLOO is implemented. Revise these numbers if future work adds per-turn rewards (which would re-enable MARS).
+
 | Metric | CUDA-Agent | KernelForge (Projected) | Ratio |
 |--------|------------|------------------------|-------|
 | RL samples | 153,600 | ~6,000 (150 steps × G=2 × avg 20 turns) | 25× fewer |
-| Per-sample efficiency | Baseline (PPO, biased) | Projected 12-25× (requires MARS+TRLOO) | Projected |
+| Per-sample efficiency | Baseline (PPO, biased) | **SPECULATIVE -- depends on unimplemented components.** TRLOO alone gives ~1.3x correction at G=2. The 12-25x claim required MARS+CPPO (both DROPPED). | Overstated |
 | Expert demonstrations (SFT) | 0 | 192 (doubleGraph A100 kernels, 84K+ lines) | Advantage |
 | Inference-time candidates | 1 (pass@1) | 8 (best-of-8) | 8× |
 | Evolutionary search | None | SkyDiscover (same Modal pipeline) | Advantage |
 
-**Note:** The "effective signal" comparison assumes full MARS+TRLOO+CPPO stack at 150-step scale, which is the future target. For the hackathon, we validate the core loop at smaller scale. The data efficiency argument is a research hypothesis, not a proven claim.
+**Note:** The original "effective signal" comparison assumed full MARS+TRLOO+CPPO stack. MARS is DROPPED (no benefit with outcome-only rewards). CPPO is DROPPED (no benefit post-SFT at G=2). The data efficiency argument with TRLOO alone is weaker than originally projected.
 
 ### Model Size Discussion (Future Scale-Up Context)
 
@@ -2337,10 +2355,11 @@ HACKATHON CONFIG (PRIMARY — this weekend)
   Steps = 100 (Stage 1) + RFT + 50 (Stage 3 pilot)
   Max turns = 3 (Stage 1) / 3-5 (Stage 3)
   Context = 8192
-  Credit = TRLOO (IMPLEMENTED); MARS (stretch goal)
-  Reward = continuous log(speedup) + optional Nsight bonus
-  Loss = standard clip
+  Credit = TRLOO only (MARS DROPPED — see GRPO-4)
+  Reward = discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
+  Loss = standard clip (MASPO DEFERRED — see GRPO-12)
   Eval = Hybrid: local nvcc early turns, Modal A100 final turn
+  Pruning = CPPO DROPPED (see GRPO-11)
   Inference = Best-of-N per problem + SkyDiscover hedge
 
   COST (hackathon):
@@ -2359,9 +2378,9 @@ FUTURE SCALE-UP CONFIG (research target — after hackathon)
 ═══════════════════════════════════════════════════════════
   Model = Qwen3-Coder-Next 80B FP8 (requires B200)
   G = 2, Steps = 150, Max turns = 20, Context = 32768
-  Full MARS+TRLOO+CPPO+MASPO stack
+  TRLOO only (MARS/CPPO DROPPED; MASPO DEFERRED)
   Cost: ~$155
-  Target: approach CUDA-Agent metrics (projected, not proven)
+  Target: approach CUDA-Agent metrics (SPECULATIVE — depends on unimplemented components)
 
 DATA SOURCES (shared):
   Ops-6K: 6,000 PyTorch operator tasks (GRPO prompts)
@@ -2380,9 +2399,9 @@ INTEGRATION STATUS:
   Nsight lightweight profiling: DONE (modal_app.py ptxas occupancy)
   TRLOO trainer: DONE (training/custom_grpo_trainer.py)
   Local compile fast-path: DONE (training/multi_turn_rollout.py)
-  MARS return-to-go: NOT YET — hackathon stretch goal (~50 LOC)
-  CPPO pruning: NOT YET — hackathon stretch goal (~40 LOC)
-  MASPO soft trust: NOT YET — future (~50 LOC)
+  MARS return-to-go: DROPPED (no benefit with outcome-only rewards — see GRPO-4)
+  CPPO pruning: DROPPED (no benefit post-SFT at G=2 — see GRPO-11)
+  MASPO soft trust: DEFERRED — future research (~50 LOC, see GRPO-12)
 ```
 
 ---

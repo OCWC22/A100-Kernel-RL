@@ -9,7 +9,8 @@ Fix: scale advantages by N/(N-1) after GRPO computes them. This is the TRLOO
 (Turn-level Reinforce Leave-One-Out) correction — mathematically equivalent to
 computing the baseline from the other G-1 samples.
 
-Combined with MARS return-to-go for multi-turn credit assignment.
+MARS return-to-go was considered but dropped: with outcome-only rewards (no per-turn
+signal), MARS degenerates to standard trajectory-level GRPO (see ALPHXIV analysis).
 """
 from __future__ import annotations
 

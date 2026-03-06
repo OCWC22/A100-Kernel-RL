@@ -93,7 +93,7 @@ def _local_compile_check(code: str) -> tuple[bool, str]:
 
 
 def _compute_reward_from_result(result: dict) -> float:
-    """Compute continuous reward from evaluation result."""
+    """Compute discrete milestone reward from evaluation result."""
     return compute_task_reward(result)
 
 
@@ -125,15 +125,15 @@ def _format_feedback(result: dict, reward: float, turn: int) -> str:
                 f"std={float(stats.get('std', 0.0)):.3f}ms"
             )
 
-        if reward < 0.05:
+        if reward <= 1.0:
             parts.append(
                 "Kernel is correct but not faster than eager PyTorch. "
                 "Try reducing memory traffic or using shared memory tiling."
             )
-        elif reward < 0.69:
+        elif reward <= 2.0:
             parts.append(
-                "Modest speedup. Push toward a 2x improvement with better occupancy, "
-                "vectorized loads, or warp-level primitives."
+                "Faster than eager PyTorch but not torch.compile. Push toward "
+                "beating torch.compile with better occupancy or warp-level primitives."
             )
 
     return "\n".join(parts)
@@ -257,7 +257,7 @@ def make_multi_turn_rollout(
                     }
                 )
 
-                if reward >= 1.6 or turn == max_turns - 1:
+                if reward >= 3.0 or turn == max_turns - 1:
                     break
 
                 feedback = _format_feedback(result, reward, turn)

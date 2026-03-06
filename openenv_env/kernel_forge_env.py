@@ -193,7 +193,7 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
                 self.best_reward = reward
                 self.best_code = action.cuda_code
 
-        done = (self.turn >= self.max_turns) or (reward >= 1.6)
+        done = (self.turn >= self.max_turns) or (reward >= 3.0)
 
         # Time-travel with experience (DoubleAI-inspired)
         # Each snapshot carries knowledge of what was tried and what failed

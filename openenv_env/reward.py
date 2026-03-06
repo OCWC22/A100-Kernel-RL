@@ -1,7 +1,8 @@
-"""Reward helpers: continuous log(speedup) + Nsight bonus + TRLOO post-process.
+"""Reward helpers: discrete milestone {-1, 1, 2, 3} + TRLOO post-process.
 
-Replaces discrete {-1,1,2,3} milestone scheme (Fix 5).
-Reuses CUDA-Agent's profiling.py + verification.py via subprocess.
+Discrete rewards per CUDA Agent ablation (96.8% vs 60.4% faster rate over continuous).
+Milestones normalize across problem difficulty — beating torch.compile on a hard problem
+and an easy problem both earn the same r=3.
 """
 from __future__ import annotations
 
@@ -34,38 +35,38 @@ def compute_reward(
     mem_coalescing: float | None = None,
     warp_efficiency: float | None = None,
 ) -> float:
-    """Return continuous reward based on log(speedup) + Nsight bonus.
+    """Return discrete milestone reward {-1, 1, 2, 3}.
+
+    Discrete milestones per CUDA Agent ablation — normalizes reward across
+    problem difficulty so beating torch.compile on sparse graphs earns the
+    same signal as beating it on dense elementwise ops.
 
     Args:
         compiled: Whether the kernel compiled successfully.
         correct: Whether the kernel produces correct output.
         speedup_vs_eager: Speedup ratio vs torch.eager baseline.
         speedup_vs_compile: Speedup ratio vs torch.compile baseline.
-        occupancy: SM occupancy from Nsight/profiling (0.0-1.0), or None.
-        mem_coalescing: Memory coalescing efficiency (0.0-1.0), or None.
-        warp_efficiency: Warp execution efficiency (0.0-1.0), or None.
+        occupancy: SM occupancy (unused in discrete mode, kept for API compat).
+        mem_coalescing: Memory coalescing (unused in discrete mode).
+        warp_efficiency: Warp efficiency (unused in discrete mode).
 
     Returns:
-        -1.0 for compile/correctness failure (REGARDLESS of speedup — correctness
-        is checked BEFORE speedup to prevent reward hacking).
-        log(speedup) + nsight_bonus for correct kernels.
+        -1.0: compile or correctness failure.
+         1.0: correct but not faster than baselines.
+         2.0: correct and faster than eager PyTorch (>5%).
+         3.0: correct and faster than torch.compile (>5%).
     """
     # Correctness gate: must pass BEFORE any speedup signal reaches gradients.
     # A fast-but-wrong kernel MUST get -1.0, not a positive reward.
     if not compiled or not correct:
         return -1.0
 
-    # Continuous speedup signal (log scale for proportional gradient)
-    base = math.log(max(speedup_vs_eager, 0.1))
-
-    # Nsight bonus when profiling metrics are available
-    if occupancy is not None:
-        occ = max(0.0, min(1.0, occupancy))
-        mem = max(0.0, min(1.0, mem_coalescing or 0.0))
-        warp = max(0.0, min(1.0, warp_efficiency or 0.0))
-        base += 0.4 * occ + 0.3 * mem + 0.2 * warp
-
-    return base
+    # Discrete milestones (highest matching tier wins)
+    if speedup_vs_compile > 1.05:
+        return 3.0
+    if speedup_vs_eager > 1.05:
+        return 2.0
+    return 1.0
 
 
 def trloo_post_process(advantages: list[float], n: int) -> list[float]:

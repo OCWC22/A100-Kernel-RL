@@ -41,21 +41,22 @@ Unbiased estimator (Chen et al. 2021): `1 - C(n-c, k) / C(n, k)`
 ### `pass_at_k_problems(results, k_values=[1, 5, 10]) -> dict`
 Mean pass@k across problems. Each result: `{"n": int, "c": int}`.
 
-## reward_monitor.py (72 lines) — STALE, NEEDS UPDATE
+## reward_monitor.py — UPDATED for discrete rewards
 
 ### `check_reward_distribution(rewards) -> dict`
 Returns: `distribution`, `total`, `mean`, `flags`, `entropy`, `tier_rates`
 
-**WARNING**: Still uses old discrete reward thresholds (3.0, -1/+3 bimodal). These flags won't trigger correctly with continuous log(speedup) reward. Needs rewrite for continuous reward distribution analysis.
+Discrete reward tiers {-1, 1, 2, 3}:
 
-**Current (stale) flags**:
-| Flag | Condition | Status |
-|------|-----------|--------|
-| Likely hacking | >90% at max reward (3.0) | STALE — rewards are continuous now |
-| Bimodal/overfitting | only -1 and +3 | STALE — no discrete 3.0 tier |
-| Model collapsed | uniform rewards | OK |
-| Cannot generate | no positive rewards | OK |
-| No speedup | max reward <= 1.0 | STALE — log(1.0)=0, should check <=0 |
+| Flag | Condition |
+|------|-----------|
+| Likely hacking | >90% at tier 3 (beats torch.compile) |
+| Bimodal | only -1 and 3 (no intermediate tiers) |
+| Model collapsed | uniform rewards |
+| Cannot generate | no positive rewards |
+| Stuck at tier 1 | >80% correct but not faster |
+
+Tier rates: `fail_rate` (r<0), `correct_rate` (r>=1), `speedup_eager_rate` (r>=2), `speedup_compile_rate` (r>=3)
 
 ## verification/pac_verify.py (225 lines)
 
@@ -121,17 +122,9 @@ Modal training app. Runs 3-stage pipeline on H100 ($3.95/hr, 80GB).
 | CPPO cheap_cuda_score pre-filter | NOT YET | GRPO-11 line 1762 |
 | Full hybrid turn-escalation | NOT YET | GRPO-10 line 1355 |
 
-## CPPO Heuristic (NOT YET IMPLEMENTED)
+## ~~CPPO Heuristic~~ — DROPPED
 
-Planned: `cheap_cuda_score()` for fast pre-filtering completions before expensive Modal eval.
-See GRPO-11, `GRPO_DEEP_DIVE.md` line 1403.
-
-Scoring rules (from deep dive):
-- Has `__global__` keyword → +1
-- Has `__shared__` memory → +1
-- Has `threadIdx`/`blockIdx` → +1
-- Compiles locally with nvcc → +2
-- Score < threshold → skip Modal eval
+CPPO completion pruning was planned but **dropped**: after SFT on expert kernels, the model generates syntactically valid CUDA by default. Heuristic checks (checking for `__shared__`, `float4`) provide no filtering value. At G=2, pruning one candidate leaves G=1 which produces zero advantage variance for TRLOO.
 
 ## Deep Dive Pointers
 

@@ -2,9 +2,9 @@
 Unified model loading for KernelForge training pipeline.
 
 Two paths:
-  Primary: Qwen3-Coder-Next (80B MoE, ~3.9B active) via HF AutoModelForCausalLM + peft LoraConfig
+  Primary: Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active) via HF AutoModelForCausalLM + peft LoraConfig
            Unsloth cannot do GPTQ-based QLoRA for MoE architectures.
-  Fallback: Qwen2.5-Coder-7B-Instruct via unsloth.FastLanguageModel (dense model)
+  Fallback: Qwen3.5-35B-A3B via unsloth.FastLanguageModel (dense model)
 
 LoRA targets differ by architecture:
   MoE: attention + shared_expert only (not all 512 routed experts → ~207GB)
@@ -19,9 +19,9 @@ TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 
 # Primary model (MoE)
-PRIMARY_MODEL = os.getenv("KERNELFORGE_MODEL", "Qwen/Qwen3-Coder-Next")
+PRIMARY_MODEL = os.getenv("KERNELFORGE_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
 # Fallback model (dense)
-FALLBACK_MODEL = os.getenv("KERNELFORGE_FALLBACK_MODEL", "Qwen/Qwen2.5-Coder-7B-Instruct")
+FALLBACK_MODEL = os.getenv("KERNELFORGE_FALLBACK_MODEL", "Qwen/Qwen3.5-35B-A3B")
 DEV_MODEL = os.getenv("KERNELFORGE_DEV_MODEL", "Qwen/Qwen2.5-Coder-0.5B-Instruct")
 
 # LoRA constants
@@ -99,7 +99,7 @@ def get_model_type() -> str | None:
 
 
 def _load_primary():
-    """Load Qwen3-Coder-Next via HF AutoModelForCausalLM + peft LoraConfig."""
+    """Load primary MoE model via HF AutoModelForCausalLM + peft LoraConfig."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training

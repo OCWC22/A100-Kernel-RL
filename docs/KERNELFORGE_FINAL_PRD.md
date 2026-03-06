@@ -112,17 +112,17 @@ A practical, budgeted system with five parts:
 - stable enough for judges to run
 
 **Component B — Real evaluation harness (CUDA Agent pipeline)**
-- 6,000 PyTorch operator tasks (CUDA-Agent-Ops-6K dataset)
+- CUDA-Agent-Ops-6K dataset (~6,000 PyTorch operator tasks as upstream data source; ~19 tasks are live-evaluable in the hackathon pilot)
 - Compile → verify → profile scripts from their agent_workdir
 - CUDA compile wrapper + anti-hack checks + execution-based correctness + A100 timing
-- Continuous reward: `log(speedup)` for correct kernels, `-1.0` for failures
+- Discrete milestone rewards: `{-1, 1, 2, 3}` matching CUDA-Agent's ablation-proven scheme
 - Floor baseline = torch.compile timing for Ops-6K tasks
 - Source: https://github.com/BytedTsinghua-SIA/CUDA-Agent
 
 **Component C — Small-budget model training loop**
 - Qwen3-Coder-30B-A3B-Instruct on H100
 - SFT warmup on curated examples (doubleGraph patterns + generated samples)
-- Short GRPO pilot after SFT (G=2, continuous reward, limited steps)
+- Short GRPO pilot after SFT (G=2, discrete milestone rewards {-1, 1, 2, 3}, limited steps)
 - TRLOO N/(N-1) correction via `TRLOOGRPOTrainer`
 - CUDA-Agent SKILL.md verbatim + doubleGraph pattern paste as prompt context
 - Hybrid eval: H100 local nvcc compile check for fast-fail, Modal A100 for all performance + correctness reward
@@ -192,7 +192,7 @@ Use curated generated examples, doubleGraph-inspired patterns, existing seed ker
 ### Phase 2 — Small-budget GRPO pilot
 Run only after SFT. Primary purpose: validate real learning signal, not full-scale benchmark domination.
 - `G=2`, short context, conservative completion length
-- continuous reward, execution-based correctness
+- discrete milestone rewards {-1, 1, 2, 3}, execution-based correctness
 - strict abort criteria
 
 ### Phase 3 — Search hedge / candidate selection
@@ -205,8 +205,10 @@ Run search in parallel or afterward:
 Hackathon reward should be simple and defensible:
 
 ```python
-reward = -1.0                        # if not compiles or not correct
-reward = log(speedup_vs_baseline)    # if compiles and correct
+reward = -1   # if not compiles or not correct
+reward = 1    # compiles and correct, but no speedup
+reward = 2    # faster than baseline
+reward = 3    # significant speedup (>2x or within 10% of expert)
 ```
 
 Optional structured bonus can be added only if actually implemented and tested:
@@ -430,7 +432,7 @@ wget -P ./wheels/ [A100_WHEEL_URL]  # Check https://github.com/double-ai/doubleG
 ```bash
 ls models/qwen3-coder-30b/  # Model files exist
 ls models/qwen35-35b/       # Fallback model exists
-python -c "from datasets import load_from_disk; print(len(load_from_disk('./data/ops_6k')['train']))"  # 6000
+python -c "from datasets import load_from_disk; print(len(load_from_disk('./data/ops_6k')['train']))"  # ~6000 (upstream data source; ~19 tasks live-evaluable in hackathon pilot)
 ls CUDA-Agent/agent_workdir/utils/  # compile.sh, verification.py, profiling.py
 ls doubleGraph/cpp/src/aai/impl/a100/  # CUDA kernel directories
 ls skydiscover/  # SkyDiscover repo
@@ -994,7 +996,7 @@ Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` an
 THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, dispatches to Modal A100 for execution-based correctness + speedup timing.
 
 **2-tier reward architecture:**
-- **Fast path (all rollouts):** CUDA events timing on A100 + execution correctness + cheap static metrics (ptxas register count, shared mem, occupancy estimate). Returns `log(speedup_vs_eager)`.
+- **Fast path (all rollouts):** CUDA events timing on A100 + execution correctness + cheap static metrics (ptxas register count, shared mem, occupancy estimate). Returns discrete milestone reward `{-1, 1, 2, 3}`.
 - **Slow path (top-k only):** Full Nsight ncu on A100 for occupancy, mem_coalescing, warp_efficiency. Adds `0.4*occ + 0.3*mem + 0.2*warp` bonus.
 
 TRLOO post-process: if Dr. Kernel derivation confirms N/(N-1) scaling, apply to advantages; otherwise run vanilla GRPO first with tight gates.
@@ -1051,7 +1053,7 @@ Key function: `load_training_dataset(stage: str) -> Dataset`
 
 Build a unified JSONL dataset that merges:
 - doubleGraph A100 manifest (192 topology-aware graph kernels)
-- CUDA-Agent Ops-6K (6,000 PyTorch operator tasks)
+- CUDA-Agent Ops-6K (~6,000 PyTorch operator tasks as upstream data source; ~19 tasks are live-evaluable in the hackathon pilot)
 
 Unified problem schema (curriculum-compatible):
 - `prompt`, `ops`, `difficulty`, `data_source`
@@ -1128,9 +1130,9 @@ python -m training.run \
 
 Key settings for hackathon:
 - Temperature: 0.9 (Stage 1), 0.7 (Stage 3)
-- Learning rate: 3e-6 (Stage 1), 5e-6 (Stage 3)
+- Learning rate: 3e-6 (Stage 1), 3e-6 (Stage 3)
 - G=2 — conservative to save eval budget
-- Max turns: 5 (Stage 1), shallow (Stage 3) — start simple, deepen only if budget allows
+- Max turns: 5 (Stage 1), 3-5 (Stage 3 hackathon pilot) — start simple, deepen only if budget allows
 - Context: 8K — conservative for hackathon pilot
 - Stage 1 may be skipped if compilation rate >70%
 
@@ -1147,7 +1149,7 @@ Stage configs for SFT warmup and GRPO pilot on H100 + A100 eval.
 |-------|-------|------|-----|---------|---|-----------|
 | 1 (Warmup) | 300 | 0.9 | 3e-6 | 8,192 | 2 | 5 |
 | 2 (SFT) | N/A (SFT 3 epochs) | 0.7 | 5e-6 | N/A | N/A | N/A |
-| 3 (GRPO pilot) | short (budget-gated) | 0.7 | 5e-6 | **8,192** | 2 | shallow |
+| 3 (GRPO pilot) | **50 steps** (hackathon pilot) | 0.7 | **3e-6** | **8,192** | 2 | **3-5** |
 
 ---
 
@@ -1286,7 +1288,7 @@ These feed into:
   - r = +3: within 10% of doubleGraph expert kernel timing
   - Per-algorithm thresholds computed from Task 24 profiling results
 
-> **IMPORTANT (Fix 2):** The cuGraph floor / doubleGraph ceiling calibration above applies ONLY to the 5 graph algorithm tasks. For the 6,000 Ops-6K PyTorch operator tasks (GEMM, softmax, layernorm, etc.), doubleGraph has NO baselines. Those tasks use torch.compile timing as the floor, matching CUDA-Agent's approach. Do not conflate graph-task calibration with Ops-6K calibration.
+> **IMPORTANT (Fix 2):** The cuGraph floor / doubleGraph ceiling calibration above applies ONLY to the 5 graph algorithm tasks. For Ops-6K PyTorch operator tasks (GEMM, softmax, layernorm, etc.), doubleGraph has NO baselines. Those tasks use torch.compile timing as the floor, matching CUDA-Agent's approach. Ops-6K (~6,000 tasks) serves as the upstream data source; ~19 tasks are live-evaluable in the hackathon pilot. Do not conflate graph-task calibration with Ops-6K calibration.
 
 > **IMPLEMENTATION NOTE (March 5, 2026):**
 >
@@ -1440,11 +1442,11 @@ These papers provide the specific techniques that address each Fundamental Failu
 
 | Paper | arXiv / Link | Role in Stack | Addresses |
 |-------|-------------|---------------|-----------|
-| **MARSHAL / MARS** | [2510.15414](https://arxiv.org/abs/2510.15414) | Turn-level cumulative advantage (+23% return, ICLR 2026) | Failure #1 (GRPO bias) |
+| ~~**MARSHAL / MARS**~~ | [2510.15414](https://arxiv.org/abs/2510.15414) | Turn-level cumulative advantage (+23% return, ICLR 2026) | ~~Failure #1 (GRPO bias)~~ **[DROPPED]** — degenerates with outcome rewards |
 | **OAPL** | [2602.19362](https://arxiv.org/abs/2602.19362) | Off-policy advantage regression (handles 400-step async lag) | Failure #3 (async Modal eval) |
 | **AReaL** | [2505.24298](https://arxiv.org/abs/2505.24298) | Async decoupled training (2.77x wall-time speedup) | Failure #3 (compute scale) |
-| **MASPO** | [2602.17550](https://arxiv.org/abs/2602.17550) | Gaussian soft trust region replacing PPO clip (+2-3%) | Failure #1 (sparse reward collapse) |
-| **CPPO** | [2503.22342](https://arxiv.org/abs/2503.22342) | Completion pruning (7.98x speedup on GSM8K) | Failure #3 (eval cost) |
+| **MASPO** | [2602.17550](https://arxiv.org/abs/2602.17550) | Gaussian soft trust region replacing PPO clip (+2-3%) | Failure #1 (sparse reward collapse) **[DEFERRED]** — future research |
+| ~~**CPPO**~~ | [2503.22342](https://arxiv.org/abs/2503.22342) | Completion pruning (7.98x speedup on GSM8K) | ~~Failure #3 (eval cost)~~ **[DROPPED]** — harmful for exploration |
 | **SortedRL** | [openreview 5v3Gzuic8i](https://openreview.net/forum?id=5v3Gzuic8i) | Length-aware online scheduling (>50% less rollout bubble) | Failure #3 (throughput) |
 
 ### Docs
@@ -1532,21 +1534,19 @@ This means rewards r=+2 and r=+3 are *mathematically unreachable*. The model can
 - **CUDABench** (arXiv [2603.02236](https://arxiv.org/abs/2603.02236)): "notable mismatch between high compilation success rates and low functional correctness" — compilation is a bad proxy for kernel quality.
 - **CUDA-L1:** Uses actual speedup measurement as contrastive signal. Their key insight: "the multiplicative nature of optimizations" — you MUST measure real performance to learn this.
 
-**Why this is fundamental, not just a TODO:** Even if we implement profiling, discrete rewards {-1,1,2,3} lose critical signal. Dr. Kernel uses continuous profiling-based rewards. CUDA-L1 uses contrastive pairs of (slow kernel, fast kernel). Our 4-level discrete scheme cannot distinguish:
-- A kernel that's 1.06x faster (barely r=+2) from one that's 5x faster (also r=+2)
-- The model has zero incentive to optimize beyond the threshold
+**Current approach (revised):** Discrete milestone rewards `{-1, 1, 2, 3}` matching CUDA-Agent's ablation-proven scheme. CUDA-Agent demonstrated 2.11x geomean speedup using discrete rewards on Ops-6K, validating this design. The discrete scheme is simpler to implement and debug for the hackathon pilot.
 
-**Revised approach (Fix 5):** Replace discrete {-1,1,2,3} with continuous reward:
-- `reward = log(speedup_vs_eager)` for correct kernels (continuous signal proportional to actual improvement)
-- Add occupancy and coalescing bonuses from Nsight Compute (or subprocess profiling.py from CUDA-Agent)
+- `reward = -1` for compile failure or correctness failure
+- `reward = 1` for correct but no speedup
+- `reward = 2` for faster than baseline
+- `reward = 3` for significant speedup (>2x or within 10% of expert)
 - Wrap with TRLOO N/(N-1) post-processing for unbiased advantage estimation
 - Reuse CUDA-Agent's profiling.py and verification.py via subprocess (copy verbatim, do NOT rewrite)
 
-**Pivot options:**
-1. Implement continuous reward: `reward = log(speedup)` instead of discrete bins
+**Future pivot options:**
+1. Continuous reward (`log(speedup)`) if discrete bins prove too coarse for convergence
 2. Add profiling-based rejection sampling (Dr. Kernel's PRS): only train on completions that BOTH compile AND show measurable speedup
 3. Use contrastive pairs: generate 2 kernels, reward the faster one relative to the slower one
-4. At minimum: implement the profiling TODO before any training run
 
 ---
 
@@ -1561,9 +1561,9 @@ This means rewards r=+2 and r=+3 are *mathematically unreachable*. The model can
 | **CUDA-L1** | Custom | A100 cluster | Full KernelBench (250 tasks) | — | Full RL loop |
 | **Us (hackathon)** | 30.5B (3.3B active) | 1x H100 | 1 prompt × G=2 | 8K tokens | SFT + short GRPO pilot |
 
-Our effective batch size is **2 completions** (G=2). CUDA Agent's is **1024**. That's 512× more gradient signal per step. CUDA Agent trains for 150 steps × 1024 batch = 153,600 effective samples. We train for ~450 steps × 2 × avg ~7 turns = ~6,300 effective samples. **That's ~25× fewer samples.** But with 12-25× per-sample efficiency (MARS+TRLOO+continuous reward), our effective signal approaches or exceeds theirs. See Section 7.8.
+Our effective batch size is **2 completions** (G=2). CUDA Agent's is **1024**. That's 512× more gradient signal per step. CUDA Agent trains for 150 steps × 1024 batch = 153,600 effective samples. We train for ~450 steps × 2 × avg ~7 turns = ~6,300 effective samples. **That's ~25× fewer samples.** **[SPECULATIVE — depends on unimplemented techniques; see Section 7.8 for caveats.]**
 
-**Why this matters from first principles:** RL for code generation has an astronomically sparse reward landscape. Most of the optimization space is "doesn't compile" (r=-1). The probability of randomly generating an optimized CUDA kernel is negligible. You need massive sampling to find the rare positive signals. With G=2, many steps will have all-negative rewards (std=0, zero gradient). CUDA Agent solved this with scale. We compensate with continuous reward (no std=0 dead zones when both compile), richer prompt context (7 SKILL.md patterns + 192 expert demos), MARS per-turn credit, and multi-turn iteration (20 turns per step). See Section 7.10 for how MARS+TRLOO stacking addresses this.
+**Why this matters from first principles:** RL for code generation has an astronomically sparse reward landscape. Most of the optimization space is "doesn't compile" (r=-1). The probability of randomly generating an optimized CUDA kernel is negligible. You need massive sampling to find the rare positive signals. With G=2, many steps will have all-negative rewards (std=0, zero gradient). CUDA Agent solved this with scale. We compensate with richer prompt context (7 SKILL.md patterns + 192 expert demos) and multi-turn iteration. MARS per-turn credit is [DROPPED] (degenerates with outcome rewards per ALPHXIV analysis). See Section 7.10 for remaining stacking techniques.
 
 **Model capacity considerations:** Qwen3-Coder-30B-A3B-Instruct has 30.5B total / 3.3B active parameters — much smaller than CUDA Agent's 23B active. However:
 - It is a coding-agent model, purpose-built for code generation and tool use
@@ -1585,19 +1585,19 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 
 | Fundamental Failure | Root Cause | Fix | Paper |
 |-------------------|------------|-----|-------|
-| **#1: GRPO bias** | Self-inclusion in group mean/std | MARS cumulative per-turn returns + TRLOO leave-one-out baseline | MARSHAL (arXiv 2510.15414) + Dr. Kernel (arXiv 2602.05885) |
+| **#1: GRPO bias** | Self-inclusion in group mean/std | TRLOO leave-one-out baseline (MARS [DROPPED] — degenerates with outcome rewards) | Dr. Kernel (arXiv 2602.05885) |
 | **#1 (post-process)** | GRPO gradient shrinkage = (1 - 1/N) | TRLOO post-process: multiply advantages by N/(N-1) scaling factor after GRPO computation. Drop-in fix, no custom training loop needed. | Dr. Kernel (arXiv 2602.05885) |
-| **#2: Lazy reward** | Discrete {-1,1,2,3} loses signal; profiling is a stub | Continuous log(speedup) + Nsight Compute structured reward: occupancy + mem_coalescing + warp_efficiency | CUDABench (arXiv 2603.02236) |
+| **#2: Lazy reward** | Reward was a stub; profiling not wired | Discrete milestone rewards {-1, 1, 2, 3} matching CUDA-Agent + optional Nsight bonus | CUDA-Agent ablation + CUDABench (arXiv 2603.02236) |
 | **#2 (action space)** | Free-form 2000-token generation = huge search space | Rich SKILL.md prompt context (CUDA-Agent verbatim + doubleGraph patterns) constrains generation. Transformation grammar deferred to v2. | CUDA-Agent SKILL.md, doubleGraph docs |
-| **#3: Compute scale** | ~110× fewer samples than CUDA Agent | CPPO pruning (only eval top-2 of G), hybrid eval (local+Modal), smaller action space, 10-20× per-sample efficiency (Section 7.8) | CPPO (arXiv 2503.22342) |
-| **#3 (throughput)** | Sync eval blocks training | MASPO soft trust region + AReaL-style replay buffer (staleness η=4-8) | MASPO (arXiv 2602.17550), AReaL (arXiv 2505.24298) |
+| **#3: Compute scale** | ~110× fewer samples than CUDA Agent | Hybrid eval (local+Modal), smaller action space, SFT bootstrapping with 192 expert demos. CPPO [DROPPED] (harmful for exploration). | Local compile fast-path |
+| **#3 (throughput)** | Sync eval blocks training | AReaL-style replay buffer (staleness η=4-8). MASPO [DEFERRED] (future research). | AReaL (arXiv 2505.24298) |
 
 **Updated probability assessment:**
 
 | Approach | Probability | Time | Why |
 |----------|------------|------|-----|
 | **SkyDiscover evolutionary search** | HIGH | 2-4 hrs | AdaEvolve proven on 200+ tasks. No training. Primary hedge. |
-| **GRPO pilot with stacked techniques** | MEDIUM | ~4-8 hrs training | TRLOO fixes bias. Continuous reward fixes signal. SFT warmup anchors compile rate. Short pilot on Qwen3-Coder-30B-A3B-Instruct (H100 gen + A100 eval). Validates real learning signal under budget. |
+| **GRPO pilot with stacked techniques** | MEDIUM | ~4-8 hrs training | TRLOO fixes bias. Discrete milestone rewards match CUDA-Agent. SFT warmup anchors compile rate. Short pilot on Qwen3-Coder-30B-A3B-Instruct (H100 gen + A100 eval). Validates real learning signal under budget. |
 | **SFT on curated data** (ConCuR-style) | MEDIUM-HIGH | 3-5 hrs | ConCuR shows curated traces > RL. Parallel track. |
 | **GRPO as originally designed in PRD** | LOW | 7-12 hrs | Without stacking, still biased, stub reward, too few samples. |
 
@@ -1605,7 +1605,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 
 | Priority | When | Activity | Deliverable |
 |----------|------|----------|-------------|
-| **P0** | By Friday night | OpenEnv env that calls CUDA-Agent's EXACT scripts (copied verbatim into evaluation/) + continuous speedup reward (log(speedup) + occupancy + coalescing) + TRLOO N/(N-1) post-process in reward wrapper | Working eval pipeline with continuous reward |
+| **P0** | By Friday night | OpenEnv env that calls CUDA-Agent's EXACT scripts (copied verbatim into evaluation/) + discrete milestone rewards {-1, 1, 2, 3} + TRLOO N/(N-1) post-process in reward wrapper | Working eval pipeline with discrete reward |
 | **P1** | Parallel with P0 | SkyDiscover evolution on 5 seed .cu files (gemm, softmax, layernorm, fused_bias_relu, reduce_sum). 80-120 evolutions per seed. | Demo-worthy evolved kernels |
 | **P2** | After P0 | Rich SKILL.md with doubleGraph patterns (from docs/skills/doublegraph_a100.md) + CUDA-Agent SKILL.md verbatim. 50-example SFT warmup via Unsloth built-in trainer. | Anchored compilation ability |
 | **P3** | After G-0.8 passes | **Short GRPO pilot:** H100 generates + updates, A100 (Modal) evaluates. G=2, short context, strict abort criteria. Gate G-0.8 must pass first. Best-of-N at inference + SkyDiscover for hardest tasks. | Validate real learning signal; demo credible improvement |
@@ -1619,11 +1619,11 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 - Total evals: budget-constrained, estimated hundreds of Modal calls
 
 **Why this revision succeeds where original PRD fails:**
-- Fixes GRPO bias (MARS+TRLOO post-process)
-- Fixes lazy reward (continuous log(speedup) + Nsight)
+- Fixes GRPO bias (TRLOO post-process; MARS [DROPPED])
+- Fixes lazy reward (discrete milestone rewards {-1, 1, 2, 3} + optional Nsight bonus)
 - Fixes eval bottleneck (local nvcc for P3, no Modal dependency)
 - Fixes action space (rich SKILL.md context, grammar deferred)
-- Fixes scope (GRPO is P3 with 150 steps/20 turns + best-of-8 after G-0.8; SkyDiscover/SFT are parallel hedges)
+- Fixes scope (GRPO is P3 with 50 steps/3-5 turns (hackathon pilot) + best-of-8 after G-0.8; SkyDiscover/SFT are parallel hedges)
 - Fixes doubleGraph scope (graph calibration for 5 tasks only, torch.compile for Ops-6K)
 - Total timeline realistic (~36 hrs with 7 hr buffer)
 
@@ -1633,11 +1633,11 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 
 | # | Failure | Severity | Evidence | Mitigation |
 |---|---------|----------|----------|------------|
-| 1.1 | **Reward function is a stub** — `compute_reward()` referenced in `training/multi_turn_rollout.py:54` but NOT DEFINED. No correctness checking (GRPO_DEEP_DIVE line 339: "TODO"). No kernel profiling (line 368: placeholder `kernel_ms = compile_ms`). | CRITICAL | Code inspection: function imported but missing. GRPO_DEEP_DIVE lines 332-369. | **Gate 0.3**: `openenv_env/reward.py` now implements continuous `log(speedup) + Nsight bonus` with `trloo_post_process()` (~60 lines). Wire to compilation result from Modal. |
+| 1.1 | **Reward function is a stub** — `compute_reward()` referenced in `training/multi_turn_rollout.py:54` but NOT DEFINED. No correctness checking (GRPO_DEEP_DIVE line 339: "TODO"). No kernel profiling (line 368: placeholder `kernel_ms = compile_ms`). | CRITICAL | Code inspection: function imported but missing. GRPO_DEEP_DIVE lines 332-369. | **Gate 0.3**: `openenv_env/reward.py` now implements discrete milestone rewards {-1, 1, 2, 3} with `trloo_post_process()` (~60 lines). Wire to compilation result from Modal. |
 | 1.2 | **Modal is single point of failure** — every eval routes through `modal.Function.from_name()`. If Modal API is down/slow during hackathon, training halts. No local fallback. | CRITICAL | `training/multi_turn_rollout.py:35-51`. All GRPO steps call Modal. | Add local eval fallback: `nvcc -arch=sm_80` subprocess + `nm -D` symbol check. 45 min. Use Modal for profiling only; local for compile+verify. |
 | 1.3 | **60s subprocess timeout too aggressive** — compilation (10-30s) + correctness (5s) + profiling (20-60s) = 35-95s total. Timeout kills valid kernels. | HIGH | GRPO_DEEP_DIVE line 398: `timeout=60`. Profiling budget line 956: "20-60s". | Increase to `timeout=120`. Or split: compile timeout=30s, profile timeout=90s separately. |
 
-**Counter-argument (why it can still work):** CUDA Agent (arXiv 2602.24286) demonstrated 2.11x speedup using discrete rewards on Ops-6K. Our revised continuous `log(speedup) + Nsight bonus` (implemented in `openenv_env/reward.py`, ~60 lines) is strictly better — it provides gradient signal even between compilation milestones. `trloo_post_process()` fixes the Dr. Kernel gradient shrinkage.
+**Counter-argument (why it can still work):** CUDA Agent (arXiv 2602.24286) demonstrated 2.11x speedup using discrete rewards on Ops-6K. Our discrete milestone rewards {-1, 1, 2, 3} match their ablation-proven scheme (implemented in `openenv_env/reward.py`, ~60 lines). `trloo_post_process()` fixes the Dr. Kernel gradient shrinkage.
 
 ---
 
@@ -1671,11 +1671,11 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 |---|---------|----------|----------|------------|
 | 4.1 | **Memory budget unverified** — Qwen3-Coder-30B-A3B-Instruct FP8 (~16-18GB) + LoRA + optimizer + KV cache + activations = ~14-20GB estimated on H100 80GB. Not yet measured on actual hardware. | MEDIUM | Estimates only, no benchmarks. | **Gate G-0.2**: Run `nvidia-smi` during model load + single GRPO step. If OOM: (a) reduce context 8K->4K, (b) reduce G=2->1, (c) switch to 4-bit quantization, (d) use fallback Qwen3.5-35B-A3B. Decision ladder, not binary. |
 | 4.2 | **TRL GRPOTrainer API compatibility** — `rollout_func` parameter is experimental. `reward_funcs` vs `reward_func` naming uncertain. `remove_unused_columns=False` behavior unverified. | HIGH | GRPO_DEEP_DIVE line 566 (`reward_funcs`), line 1080 (`remove_unused_columns`). | **Gate G-0.6**: `test_06_grpo_init.py` — initialize GRPOTrainer with our config, verify no crash. 15 min. TRL pinned to ==0.29.0 in pyproject.toml — do NOT upgrade without re-running gate. |
-| 4.3 | **G=2 + low compilation rate = zero-gradient steps** — if base model compiles <30% of CUDA, P(all 2 fail) = 49%. Those steps produce std(r)=0 -> advantage=0 -> no learning. Continuous reward mitigates: when both compile, std>0. | HIGH | No empirical compilation rate for Qwen3-Coder-30B-A3B-Instruct. | **Gate G-25** (Saturday morning): test_07 measures compilation rate. If <50%: extend SFT warmup. If <30%: switch model. If persistently low: abandon GRPO, ship SFT + search + environment. |
+| 4.3 | **G=2 + low compilation rate = zero-gradient steps** — if base model compiles <30% of CUDA, P(all 2 fail) = 49%. Those steps produce std(r)=0 -> advantage=0 -> no learning. Discrete milestone rewards {-1, 1, 2, 3} provide variance when both compile at different quality levels. | HIGH | No empirical compilation rate for Qwen3-Coder-30B-A3B-Instruct. | **Gate G-25** (Saturday morning): test_07 measures compilation rate. If <50%: extend SFT warmup. If <30%: switch model. If persistently low: abandon GRPO, ship SFT + search + environment. |
 
 **Counter-argument:** GRPO (arXiv 2402.03300, DeepSeekMath) has been validated in multiple domains. The "step-17 collapse" from CUDA Agent Section 3.3 is specifically for PURE RL without warmup — SFT-first addresses this. Qwen3-Coder-30B-A3B-Instruct is a coding-agent model with strong baseline code generation capability. The risk is real but bounded by our decision gates and abort criteria.
 
-**Hackathon approach:** TRLOO N/(N-1) correction fixes the Dr. Kernel bias. SFT warmup anchors compile rate. G=2 keeps eval budget low. Continuous reward provides signal even when both candidates compile (no std=0 dead zones). Short GRPO pilot validates real learning signal. If it fails: ship SFT + search + environment — do not force a fake RL success story.
+**Hackathon approach:** TRLOO N/(N-1) correction fixes the Dr. Kernel bias. SFT warmup anchors compile rate. G=2 keeps eval budget low. Discrete milestone rewards {-1, 1, 2, 3} provide reward variance when both candidates compile at different quality levels. Short GRPO pilot (50 steps, 3e-6 LR) validates real learning signal. If it fails: ship SFT + search + environment -- do not force a fake RL success story.
 
 ---
 
@@ -1700,7 +1700,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | **G-0.5** | Thu night | SFT data generated | `data/sft_data.json` has >=50 compilable examples | Lower bar to 30; if API fails, use combined dataset as warmup data |
 | **G-0.6** | Fri morning | GRPOTrainer initializes | test_06 passes, no OOM, no API errors | Adapt to TRL API changes (read changelog) |
 | **G-0.7** | Fri afternoon | Full GRPO step works | test_08 completes: generate -> compile -> reward -> gradient update | Debug loop; if unfixable, fall back to SFT-only + SkyDiscover |
-| **G-0.8** | Thu night | 5-step GRPO sanity | Run 5 GRPO steps with continuous reward + TRLOO post-process. Must see: (a) non-zero gradients in 4/5 steps, (b) reward variance > 0 in 3/5 steps, (c) at least 2/20 test kernels achieve >1.2x speedup vs torch.compile. | Zero gradients → reward function broken. No speedup → model cannot optimize, fall back to SFT + SkyDiscover only. Do NOT continue to P3 GRPO. |
+| **G-0.8** | Thu night | 5-step GRPO sanity | Run 5 GRPO steps with discrete milestone rewards {-1, 1, 2, 3} + TRLOO post-process. Must see: (a) non-zero gradients in 4/5 steps, (b) reward variance > 0 in 3/5 steps, (c) at least 2/20 test kernels achieve >1.2x speedup vs torch.compile. | Zero gradients → reward function broken. No speedup → model cannot optimize, fall back to SFT + SkyDiscover only. Do NOT continue to P3 GRPO. |
 | **G-25** | Sat 9 AM | Compilation rate | test_07: base model >=50% compilation rate | <50%: extend warmup. <30%: switch model. <10%: abandon GRPO, go SkyDiscover-only. |
 
 ---
@@ -1713,7 +1713,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 |-------|------|----------|---------------|
 | **Wed night** | 4 hrs | Downloads + API key setup + GLM-5 API registration | Re-download Thu morning if needed |
 | **Thu 9AM-12PM** | 3 hrs | H100 setup + CUDA verify + Gate G-0.2. Load Qwen3-Coder-30B-A3B-Instruct via Unsloth. | 1 hr debug buffer |
-| **Thu 1PM-6PM** | 5 hrs | **P0 — Core pipeline:** Copy CUDA-Agent eval scripts verbatim into evaluation/. Wire continuous reward function (log(speedup) + occupancy + coalescing). Add TRLOO N/(N-1) post-process wrapper. Gate G-0.3. | 2 hr buffer |
+| **Thu 1PM-6PM** | 5 hrs | **P0 — Core pipeline:** Copy CUDA-Agent eval scripts verbatim into evaluation/. Wire discrete milestone reward function {-1, 1, 2, 3}. Add TRLOO N/(N-1) post-process wrapper. Gate G-0.3. | 2 hr buffer |
 | **Thu 6PM-11PM** | 5 hrs | **P1 — SkyDiscover (parallel):** Set up evaluator on 5 seed .cu files. Launch 80-120 evolution runs. **P2 — SKILL.md:** Copy CUDA-Agent SKILL.md verbatim. Extract doubleGraph patterns into prompt context. | SkyDiscover runs overnight |
 | **Fri 9AM-1PM** | 4 hrs | **P2 — SFT warmup:** 50-example SFT via Unsloth built-in trainer. Verify >70% compile rate with local nvcc. Gate G-0.8: 5-step GRPO sanity check. | If compile rate <70%, extend SFT |
 | **Fri 1PM-Sat 3AM** | 14 hrs | **P3 — GRPO pilot:** H100 generates + updates weights; Modal A100 evaluates correctness + speedup for reward. Only if G-0.8 passes. Short run with strict abort gates. | If GRPO stalls, SFT + SkyDiscover results are the submission |
@@ -1723,7 +1723,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 
 **Total available: ~43 hrs. Total planned: ~36 hrs. Buffer: ~7 hrs (16%).**
 
-**Key change from previous timeline:** P0 (eval pipeline + continuous reward) must work before anything else. SkyDiscover runs in parallel as the primary hedge. GRPO is P3 — a serious 50-step run with 10 turns and 16K context (upgraded from 10-step demo per Section 7.5 feasibility analysis). It only runs if G-0.8 passes. Transformation grammar dropped from v1. The eval pipeline reuses CUDA-Agent's scripts verbatim rather than rewriting them.
+**Key change from previous timeline:** P0 (eval pipeline + discrete milestone reward) must work before anything else. SkyDiscover runs in parallel as the primary hedge. GRPO is P3 — a 50-step run with 3-5 turns and 8K context (hackathon pilot config). It only runs if G-0.8 passes. Transformation grammar dropped from v1. The eval pipeline reuses CUDA-Agent's scripts verbatim rather than rewriting them.
 
 ---
 
@@ -1777,7 +1777,7 @@ That is the correct version of the project for this weekend.
 
 ### Original Assessment: Matching CUDA-Agent on Single B200 (FUTURE TARGET)
 
-> **Added March 5, 2026. Revised March 5.** Quantitative analysis of how our stacked TRLOO-GRPO approach on a single B200 matches CUDA-Agent's benchmark results at 30-60× lower cost.
+> **Added March 5, 2026. Revised March 5.** Quantitative analysis of how our stacked TRLOO-GRPO approach on a single B200 could approach CUDA-Agent's benchmark results. **[SPECULATIVE — projections below depend on MARS [DROPPED], CPPO [DROPPED], and other unimplemented techniques. Actual hackathon pilot uses 50 steps, discrete {-1,1,2,3} rewards, and TRLOO only.]**
 
 ### 7.1 CUDA-Agent Benchmark (The Target)
 
@@ -1808,14 +1808,14 @@ CUDA-Agent (Seed 1.6 230B MoE, 23B active, 128× H20 GPUs, PPO with critic, batc
 | Dimension | CUDA-Agent | KernelForge | Who Wins? |
 |-----------|------------|-------------|-----------|
 | Model size | 230B MoE, **23B active** | 80B MoE, **3B active** | THEM (8× active params) |
-| Base CUDA capability | Seed 1.6 (general LLM) | Qwen3-Coder-Next (800K executable tasks, agentic RL pre-trained) | **US** (much stronger CUDA baseline) |
+| Base CUDA capability | Seed 1.6 (general LLM) | Qwen3-Coder-30B-A3B-Instruct (hackathon); Qwen3-Coder-Next 80B (future scale-up) | **US** (coding-agent baseline) |
 | RL algorithm | PPO + critic network | TRLOO-GRPO (criticless, unbiased) | **US** (+72% Fast@1.2× per Dr. Kernel) |
 | Compute scale | 128× H20 GPUs | 1× B200 | THEM (128×) |
-| Effective RL samples | 153,600 (150 steps × 1024 batch) | ~6,000 (300+150 steps × G=2 × avg ~7 turns) | THEM (25×) |
-| Multi-turn depth | 150 turns, 128K context | **20 turns, 32K context** (match config) | THEM (7.5× more turns, but our MARS credits each turn 2-3× more effectively) |
-| Reward signal | Discrete {-1, 1, 2, 3} | Continuous log(speedup) + Nsight bonus | **US** (3.6× more gradient info per Dr. Kernel) |
+| Effective RL samples | 153,600 (150 steps × 1024 batch) | **[SPECULATIVE]** ~6,000 (future target; hackathon pilot: ~19 live-evaluable tasks, 50 steps) | THEM (25×) |
+| Multi-turn depth | 150 turns, 128K context | **20 turns, 32K context** (match config) | THEM (7.5× more turns) |
+| Reward signal | Discrete {-1, 1, 2, 3} | Discrete {-1, 1, 2, 3} (matching CUDA-Agent) + optional Nsight bonus | EVEN (same scheme) |
 | Advantage estimation | Standard PPO (biased for small groups) | TRLOO N/(N-1) (mathematically unbiased) | **US** (removes 50% gradient shrinkage at G=2) |
-| Credit assignment | Flat (all turns same reward) | MARS per-turn cumulative returns | **US** (+23% return per MARSHAL ablations) |
+| Credit assignment | Flat (all turns same reward) | Flat (MARS [DROPPED] — degenerates with outcome rewards) | EVEN |
 | Prompt context | Basic system prompt | CUDA-Agent SKILL.md + doubleGraph A100 patterns (1,600+ lines) | **US** (richer optimization priors) |
 | Inference-time compute | 1 candidate per problem | **Best-of-8** (generate 8, pick fastest correct) | **US** (3-5× effective improvement) |
 | Expert demonstrations | 0 | 192 A100 kernels from doubleGraph (84K+ lines) | **US** (∞ — they have zero expert signal) |
@@ -1827,7 +1827,7 @@ CUDA-Agent (Seed 1.6 230B MoE, 23B active, 128× H20 GPUs, PPO with critic, batc
 Each metric has two tiers: **training-time** (what the model produces per-candidate) and **inference-time** (after best-of-8 selection + SkyDiscover).
 
 **Pass Rate: 98-99% → MATCHES 98.8% ✅**
-- Training-time (pass@1): ~93-96%. RFT on 192 REAL expert demos + 150 GRPO steps with MARS per-turn credit.
+- Training-time (pass@1): ~93-96% **[SPECULATIVE]**. RFT on 192 REAL expert demos + GRPO steps with TRLOO.
   CUDA-Agent ablation: RFT alone gets 95.6%; our RFT includes 192 expert kernels + filtered trajectories → stronger anchor.
 - Inference-time (best-of-8): 1 - (1-0.95)^8 ≈ 99.99%. At 95% base pass rate, 8 candidates
   virtually guarantees a correct kernel for every problem.
@@ -1835,9 +1835,7 @@ Each metric has two tiers: **training-time** (what the model produces per-candid
   Our best-of-8 on a 3B-active model trained on 6K high-quality samples exceeds this.
 
 **Faster-than-compile: 93-97% → MATCHES 96.8% ✅**
-- Training-time (single candidate): ~80-88%. MARS per-turn credit focuses learning on optimization
-  turns (5-20). SKILL.md gives 7 concrete A100 strategies. 150 steps × 20 turns = 3,000
-  optimization episodes (each 12-25× more informative than CUDA-Agent's PPO samples).
+- Training-time (single candidate): ~80-88% **[SPECULATIVE]**. SKILL.md gives 7 concrete A100 strategies. TRLOO fixes gradient bias at G=2.
 - Inference-time (best-of-8): Select fastest correct kernel from 8 candidates.
   If each has 85% chance of being faster: best-of-8 = 1-(0.15)^8 ≈ 99.97%.
   But speedup isn't binary — we select the FASTEST, so effective rate even higher.
@@ -1845,18 +1843,18 @@ Each metric has two tiers: **training-time** (what the model produces per-candid
   optimized variants independent of GRPO. Fills the long tail.
 
 **Geomean Speedup: 2.0-2.3× → MATCHES 2.11× ✅**
-- Training-time (per-kernel average): ~1.8-2.1×. MARS+TRLOO focus gradient on optimization turns.
-  192 expert demos show the model what 3.6× looks like. Continuous reward drives beyond "just correct."
+- Training-time (per-kernel average): ~1.8-2.1× **[SPECULATIVE]**. TRLOO fixes gradient bias.
+  192 expert demos show the model what 3.6× looks like. Discrete milestone rewards provide clear optimization targets.
 - Inference-time (best-of-8 max speedup): Select the fastest correct kernel from 8 candidates.
   With 8 samples, the max speedup is ~1.3-1.5× higher than the mean. Mean 1.9× → max-of-8 ≈ 2.2-2.5×.
 - SkyDiscover: Starting from doubleGraph seeds (already 3.6× on graph algorithms),
   evolutionary search maintains or improves baseline speedups.
 
-**Overall: MATCHES CUDA-Agent at 30-60× lower cost.**
+**Overall: [SPECULATIVE] projected to approach CUDA-Agent at lower cost. Not yet proven.**
 
 ### 7.5 Match Configuration: Full Stack on Single B200
 
-The match strategy uses three layers: (1) expert bootstrapping via SFT, (2) efficient RL with MARS+TRLOO+CPPO, (3) inference-time compute + SkyDiscover.
+The match strategy uses three layers: (1) expert bootstrapping via SFT, (2) efficient RL with TRLOO (MARS [DROPPED], CPPO [DROPPED]), (3) inference-time compute + SkyDiscover.
 
 #### Layer 1: Expert Bootstrapping (Stages 1-2)
 
@@ -1877,21 +1875,23 @@ STAGE 2 — RFT (anchor with expert patterns)
   Cost: ~0.5 hrs × $6.25 = $3.13
 ```
 
-#### Layer 2: MARS+TRLOO GRPO (Stage 3 — the main event)
+#### Layer 2: TRLOO GRPO (Stage 3 — the main event)
+
+> **Hackathon pilot config:** 50 steps, 3e-6 LR, 3-5 turns, 8K context on H100. The config below is the future scale-up target on B200.
 
 ```
-STAGE 3 — GRPO + CURRICULUM (match config)
+STAGE 3 — GRPO + CURRICULUM (future scale-up config — NOT hackathon)
   GPU: B200 (192GB, 92GB free after model load)
   Steps: 150 (matches CUDA-Agent's 150 steps — but on 1 GPU, not 128)
   G: 2
   Max turns: 20 (full compile→correct→optimize→tune lifecycle)
   Context: 32,768 tokens (KV cache ≈ 40GB → 52GB headroom on B200)
   Temperature: 0.7
-  LR: 5e-6
-  Credit: MARS per-turn cumulative returns + TRLOO leave-one-out
-  Reward: Continuous log(speedup) + Nsight bonus (top-k)
-  Pruning: CPPO cheap_cuda_score() filter before Modal eval
-  Loss: MASPO soft trust σ=0.2 (or standard clip)
+  LR: 3e-6 (hackathon pilot; 5e-6 was original future target)
+  Credit: TRLOO leave-one-out (MARS [DROPPED] — degenerates with outcome rewards)
+  Reward: Discrete milestone {-1, 1, 2, 3} + optional Nsight bonus (top-k)
+  Pruning: (CPPO [DROPPED] — harmful for exploration)
+  Loss: Standard clip (MASPO [DEFERRED] — future research)
 
   B200 cost: 150 steps × ~4 min/step = ~10 hrs × $6.25 = $62.50
   A100 eval: ~1,200 Modal calls × 30s = ~10 hrs × $2.50 = $25.00
@@ -1930,7 +1930,7 @@ TOTAL:                          ~$155.50
 After $30 free credit:          ~$125.50
 
 vs CUDA-Agent: 128× H20 GPUs = ~$5,000-10,000+
-EFFICIENCY: 30-60× cheaper for equivalent results
+EFFICIENCY: [SPECULATIVE] 30-60× cheaper — cost is real, "equivalent results" is unproven
 ```
 
 ### 7.6 Expected Results (Match Configuration)
@@ -1948,7 +1948,7 @@ EFFICIENCY: 30-60× cheaper for equivalent results
 
 ### 7.7 Smaller Models Analysis
 
-**Qwen3-Coder-Next 80B MoE IS already a "small" model at inference time.** It has 80B total parameters but only 3B active due to MoE routing. This gives 80B of stored knowledge at 3B inference cost — there is no free lunch from going smaller.
+**Note: This section analyzes the future scale-up model (Qwen3-Coder-Next 80B), not the hackathon primary (Qwen3-Coder-30B-A3B-Instruct).** Qwen3-Coder-Next 80B MoE IS already a "small" model at inference time. It has 80B total parameters but only 3B active due to MoE routing. This gives 80B of stored knowledge at 3B inference cost — there is no free lunch from going smaller.
 
 | Model | VRAM (FP8) | Active Params | Gen Speed | CUDA Capability |
 |-------|-----------|---------------|-----------|-----------------|
@@ -1964,42 +1964,46 @@ EFFICIENCY: 30-60× cheaper for equivalent results
 
 ### 7.8 Data Efficiency: Why 6,000 Samples Match 153,600
 
+> **[SPECULATIVE] The "12-25x per-sample efficiency" claim below depends on MARS [DROPPED] and CPPO [DROPPED]. With only TRLOO implemented, actual per-sample efficiency improvement is the TRLOO +72% Fast@1.2x rate, not 12-25x. The hackathon pilot trains ~50 steps x G=2, not 150 steps x 20 turns.**
+
 | Metric | CUDA-Agent | KernelForge | Ratio |
 |--------|------------|-------------|-------|
-| RL training samples | 153,600 | ~6,000 (150 steps × G=2 × avg 20 turns) | 25× fewer |
-| Per-sample efficiency | Baseline (PPO, biased) | 12-25× (MARS+TRLOO, unbiased, continuous) | **US** |
-| Effective RL signal | 153,600 | 72,000-150,000 | **0.5-1.0×** (approaches parity) |
+| RL training samples | 153,600 | ~6,000 (150 steps × G=2 × avg 20 turns) **[future target]** | 25× fewer |
+| Per-sample efficiency | Baseline (PPO, biased) | **[SPECULATIVE]** 12-25× (originally MARS+TRLOO+continuous; MARS [DROPPED], CPPO [DROPPED]) | Actual: TRLOO only |
+| Effective RL signal | 153,600 | **[SPECULATIVE]** 72,000-150,000 | Unproven |
 | Expert demonstrations | 0 | 192 (doubleGraph, 84K+ lines) | **∞** |
 | Inference-time candidates | 1 (pass@1) | 8 (best-of-8) | **8×** |
 | Evolutionary search | None | SkyDiscover (same Modal pipeline) | **∞** |
 | Net effective signal | 153,600 | **~200,000-400,000** | **1.3-2.6× MORE** |
 
 Combined supervised+RL dataset coverage used by KernelForge:
-- Ops-6K tasks: ~6,000
+- Ops-6K tasks: ~6,000 (upstream data source)
 - doubleGraph A100 tasks: 192
 - Combined pool: ~6,192 tasks
+- **Hackathon pilot live-evaluable:** ~19 tasks (subset with working eval pipelines)
 
-This merged pool balances dense operator optimization (Ops-6K) with topology-aware graph optimization (doubleGraph), improving curriculum coverage across phases 1-4 while keeping a single prompt/problem contract.
+Ops-6K serves as the upstream data source; ~19 tasks are live-evaluable in the hackathon pilot. This merged pool balances dense operator optimization (Ops-6K) with topology-aware graph optimization (doubleGraph), improving curriculum coverage across phases 1-4 while keeping a single prompt/problem contract.
 
-**Why 12-25× per-sample efficiency:**
-1. **Continuous reward** (log(speedup)): ~3.6× more gradient info vs discrete {-1,1,2,3} (Dr. Kernel)
-2. **TRLOO** (unbiased G=2): Removes 50% gradient shrinkage at G=2 (Dr. Kernel: +72% Fast@1.2×)
-3. **MARS per-turn credit**: +23% return (MARSHAL ablations) — each turn learns 2-3× faster
-4. **Stronger base model**: Qwen3-Coder-Next 800K-task agentic pre-training vs Seed 1.6's general training
-5. **192 expert demos**: Real A100 kernels as SFT anchor — CUDA-Agent has zero expert demonstrations
-6. **7 SKILL.md patterns**: Concrete optimization strategies from doubleGraph production code in every prompt
-7. **CPPO filtering**: Only high-quality candidates get expensive Modal eval → cleaner gradients
+**Why per-sample efficiency (revised — actual implemented techniques):**
+1. **TRLOO** (unbiased G=2): Removes 50% gradient shrinkage at G=2 (Dr. Kernel: +72% Fast@1.2×) -- **IMPLEMENTED**
+2. **192 expert demos**: Real A100 kernels as SFT anchor — CUDA-Agent has zero expert demonstrations -- **IMPLEMENTED**
+3. **7 SKILL.md patterns**: Concrete optimization strategies from doubleGraph production code in every prompt -- **IMPLEMENTED**
+4. ~~**MARS per-turn credit**~~: [DROPPED] — degenerates to flat returns with outcome-level (non-process) rewards per ALPHXIV analysis
+5. ~~**CPPO filtering**~~: [DROPPED] — harmful for exploration; prunes candidates the model needs to learn from
+6. ~~**Continuous reward**~~: Replaced with discrete milestone rewards {-1, 1, 2, 3} matching CUDA-Agent
 
-**The compound math:**
+**The compound math: [SPECULATIVE — original projection, not validated]**
 ```
+[SPECULATIVE — depends on dropped MARS+CPPO techniques]
 CUDA-Agent: 153,600 samples × 1.0× efficiency = 153,600 effective signal
-KernelForge: 6,000 samples × 15× avg efficiency = 90,000 effective RL signal
+KernelForge (original projection): 6,000 samples × 15× avg efficiency = 90,000 effective RL signal
              + 192 expert demos ≈ 15,000 effective signal (SFT bootstrapping)
              + best-of-8 at inference ≈ 3× effective improvement
              = (90,000 + 15,000) × 3 = ~315,000 effective signal
 
-KernelForge / CUDA-Agent = 315,000 / 153,600 = 2.05× MORE effective signal
-At 30-60× lower cost.
+Original projection: KernelForge / CUDA-Agent = 315,000 / 153,600 = 2.05× MORE effective signal
+NOTE: This 2.05x claim depends on MARS [DROPPED] and CPPO [DROPPED].
+Actual hackathon pilot: TRLOO only, 50 steps, ~19 live-evaluable tasks.
 ```
 
 ### 7.9 Bottom Line
@@ -2009,16 +2013,18 @@ At 30-60× lower cost.
 The strategy has four layers:
 
 1. **Expert bootstrapping** — 192 real A100 kernels via SFT puts us at CUDA-Agent's ~step-50 level before RL begins. They have ZERO expert demonstrations.
-2. **Efficient RL** — MARS+TRLOO+CPPO on 150 steps with 20 turns delivers 12-25× more learning per sample. 6,000 high-quality samples ≈ 90,000+ effective signal.
+2. **Efficient RL** — TRLOO on 50 steps (hackathon pilot) with discrete milestone rewards. MARS [DROPPED], CPPO [DROPPED]. The original "12-25x more learning per sample" projection is **[SPECULATIVE]** and not achievable with current stack.
 3. **Inference-time compute** — Best-of-8 candidate selection closes the remaining gap. Generate 8, evaluate all, pick the fastest correct kernel. Cheap on Modal A100.
 4. **SkyDiscover hedge** — Evolutionary search on the hardest problems, starting from GRPO outputs + doubleGraph seeds. Independent of RL convergence.
 
 **Cost:** ~$155 total ($125 after credits). vs CUDA-Agent's ~$5,000-10,000+.
-**Efficiency:** 30-60× cheaper for equivalent results.
+**Efficiency:** **[SPECULATIVE]** Originally projected "30-60x cheaper for equivalent results" but this depends on MARS [DROPPED] and CPPO [DROPPED]. Actual cost advantage is real; performance equivalence is unproven.
 
-The key insight: CUDA-Agent spent massive compute on EXPLORATION (discovering what good CUDA code looks like from scratch via RL). We skip exploration with 192 real expert demonstrations + 7 SKILL.md patterns from doubleGraph production code. Our RL budget goes entirely to EXPLOITATION (learning to optimize for specific problems), which is where MARS+TRLOO excel.
+The key insight: CUDA-Agent spent massive compute on EXPLORATION (discovering what good CUDA code looks like from scratch via RL). We skip exploration with 192 real expert demonstrations + 7 SKILL.md patterns from doubleGraph production code. Our RL budget goes entirely to EXPLOITATION (learning to optimize for specific problems), which is where TRLOO excels. (MARS [DROPPED] -- degenerates with outcome rewards.)
 
-### 7.10 MARS+TRLOO+CPPO: How the Stacked RL Fixes Enable CUDA Kernel Generation
+### 7.10 Stacked RL Techniques for CUDA Kernel Generation
+
+> **Status update:** MARS [DROPPED] (degenerates with outcome rewards per ALPHXIV analysis). CPPO [DROPPED] (harmful for exploration). MASPO [DEFERRED] (future research). Only TRLOO is implemented and active. The analysis below is retained for reference but the MARS and CPPO sections describe dropped techniques.
 
 #### The CUDA Kernel Iteration Lifecycle
 
@@ -2035,7 +2041,9 @@ Multi-turn CUDA kernel optimization follows a predictable lifecycle across 20 tu
 
 Standard GRPO assigns the SAME advantage to every token in every turn based on the final reward. If the model achieves 2.0× speedup at turn 15, ALL tokens — including turn 1's compile error — get advantage proportional to log(2.0) = 0.69. The model cannot learn that compilation setup has modest value while optimization turns produce the actual speedup.
 
-#### MARS Per-Turn Credit for CUDA
+#### MARS Per-Turn Credit for CUDA [DROPPED]
+
+> **[DROPPED]** MARS degenerates to flat returns when using outcome-level (non-process) rewards. With discrete milestone rewards {-1, 1, 2, 3} assigned at episode end, all turns receive the same cumulative return, eliminating the per-turn credit advantage. Retained below for reference only.
 
 MARS computes per-turn cumulative returns R_k = r_k + γ·R_{k+1} (backward pass, γ=1.0):
 
@@ -2059,19 +2067,21 @@ With MARS:   Turn 3 (R₃=2.47) gets 3× more credit than Turn 8 (R₈=0.85).
              Correctness boundary = highest-value transition. GOOD.
 ```
 
-**Key insight:** MARS discovers that **getting to "correct" is the bottleneck**. Most cumulative value concentrates at the compilation→correctness boundary (turns 2-4), because that's the gate that enables all downstream optimization. This matches the CUDA-Agent ablation: multi-turn is #1 precisely because it enables the compile→correct→optimize lifecycle.
+**Key insight (theoretical — MARS is [DROPPED]):** MARS would discover that **getting to "correct" is the bottleneck** -- but only with per-turn process rewards. With outcome-level discrete rewards, MARS degenerates to flat credit assignment, providing no benefit over standard GRPO.
 
 #### TRLOO Fixes G=2 Bias
 
-With G=2, standard GRPO shrinks gradients by 50%: E[ĝ] = (1 - 1/2) × ∇J = 0.5 × ∇J. TRLOO applies N/(N-1) = 2× correction, restoring unbiased gradients. Combined with MARS per-turn returns, each turn gets: A_{i,k} = R_{i,k} - mean(R_{j≠i,k}) — leave-one-out baseline per turn. This is critical at G=2: without TRLOO, HALF the gradient signal is lost. Dr. Kernel ablation: TRLOO gives +72% Fast@1.2× rate.
+With G=2, standard GRPO shrinks gradients by 50%: E[ĝ] = (1 - 1/2) × ∇J = 0.5 × ∇J. TRLOO applies N/(N-1) = 2× correction, restoring unbiased gradients. This is critical at G=2: without TRLOO, HALF the gradient signal is lost. Dr. Kernel ablation: TRLOO gives +72% Fast@1.2× rate. (MARS per-turn returns [DROPPED] — degenerates with outcome rewards.)
 
-#### CPPO Filters Before Expensive Modal Eval
+#### CPPO Filters Before Expensive Modal Eval [DROPPED]
 
-Before sending candidates to A100 eval ($2.50/hr), CPPO scores them cheaply via structural heuristics (+2 for `__global__`, +1 for `__shared__`, +0.5 for float4/shuffles/launch_bounds, -1 for suspiciously short code). With G=2: lower-scoring candidate gets r=-1.0 without Modal eval if score is below threshold. Saves ~40% of Modal calls (~$15 over 150 steps).
+> **[DROPPED]** CPPO completion pruning is harmful for exploration. With G=2, pruning one of two candidates eliminates the gradient signal entirely for that step. The model needs to see both good and bad candidates to learn. Retained below for reference only.
+
+Before sending candidates to A100 eval ($2.50/hr), CPPO would score them cheaply via structural heuristics (+2 for `__global__`, +1 for `__shared__`, +0.5 for float4/shuffles/launch_bounds, -1 for suspiciously short code). With G=2: lower-scoring candidate would get r=-1.0 without Modal eval if score is below threshold.
 
 #### Expert Demos + SKILL.md Amplification
 
-192 doubleGraph A100 kernels + 7 SKILL.md patterns mean the model generates optimization-aware code from turn 1 (not turn 10). MARS sees higher rewards earlier → stronger learning signal → faster convergence. The model doesn't need 150 turns to discover `float4` loads — it knows them from SKILL.md. It uses turns for problem-specific adaptation instead.
+192 doubleGraph A100 kernels + 7 SKILL.md patterns mean the model generates optimization-aware code from turn 1 (not turn 10). The model doesn't need 150 turns to discover `float4` loads -- it knows them from SKILL.md. It uses turns for problem-specific adaptation instead.
 
 #### SkyDiscover as Floor + Supplement
 
@@ -2086,12 +2096,12 @@ Even if GRPO underperforms projections, SkyDiscover provides a floor:
 | Technique | What It Fixes | Quantified Impact | Status |
 |-----------|--------------|-------------------|--------|
 | **TRLOO** | 50% gradient shrinkage at G=2 | +72% Fast@1.2× rate (Dr. Kernel) | **DONE** |
-| **MARS** | All-turns-same-credit collapse | +23% return (MARSHAL ablations) | NOT YET (~50 LOC) |
-| **CPPO** | Wasted Modal evals on bad code | ~40% fewer Modal calls, cleaner gradients | NOT YET (~40 LOC) |
+| ~~**MARS**~~ | ~~All-turns-same-credit collapse~~ | ~~+23% return (MARSHAL ablations)~~ | **[DROPPED]** — degenerates with outcome rewards |
+| ~~**CPPO**~~ | ~~Wasted Modal evals on bad code~~ | ~~~40% fewer Modal calls~~ | **[DROPPED]** — harmful for exploration at G=2 |
 | **192 expert demos** | No real A100 patterns in training | SFT anchor = CUDA-Agent step-50 equivalent | **DONE** |
 | **7 SKILL.md patterns** | Generic prompts | Concrete optimization strategies every prompt | **DONE** |
 | **Topology curriculum** | One-size-fits-all training | 21 problems, 5 graph-structure-specific | **DONE** |
 | **Best-of-8 inference** | Single candidate per problem | pass@8 ≈ 99.99%; max speedup selection | Eval-time |
 | **SkyDiscover hedge** | GRPO might converge slowly | Evolutionary search floor on demo quality | **DONE** |
 
-**Compound effect:** These techniques are MULTIPLICATIVE, not additive. TRLOO fixes the gradient → MARS correctly distributes fixed gradients per turn → CPPO ensures only viable candidates consume expensive eval → expert demos anchor the starting point higher → SKILL.md guides generation toward known-good patterns → best-of-8 at inference picks the best outcome → SkyDiscover fills the hardest gaps. The result: **2.05× more effective signal than CUDA-Agent at 30-60× lower cost.**
+**Compound effect (revised):** TRLOO fixes the gradient bias at G=2 → expert demos anchor the starting point higher → SKILL.md guides generation toward known-good patterns → best-of-8 at inference picks the best outcome → SkyDiscover fills the hardest gaps. ~~MARS correctly distributes fixed gradients per turn~~ [DROPPED]. ~~CPPO ensures only viable candidates consume expensive eval~~ [DROPPED]. The original claim of **"2.05x more effective signal than CUDA-Agent at 30-60x lower cost"** is **[SPECULATIVE]** and depends on the dropped techniques.

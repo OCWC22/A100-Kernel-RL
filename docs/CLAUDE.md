@@ -72,15 +72,15 @@ Source: [modal.com/pricing](https://modal.com/pricing)
 | GRPO-1 | The Algorithm (Full Math) |
 | GRPO-2 | Memory Budget (H100 primary, B200 future) |
 | GRPO-3 | TRL GRPOTrainer — Exact Configuration |
-| GRPO-4 | MARS+TRLOO Credit Assignment (Multi-Turn) — MARS is NOT YET |
+| GRPO-4 | MARS+TRLOO Credit Assignment (Multi-Turn) — MARS is DROPPED |
 | GRPO-5 | Compute Budget (Hackathon: H100 + A100) |
 | GRPO-6 | What To Monitor During Training |
 | GRPO-7 | Critical Implementation Notes |
 | GRPO-8 | Quick Reference Card (hackathon config) |
 | GRPO-9 | Nsight Compute Structured Rewards |
 | GRPO-10 | Hybrid Eval (Local + Modal) |
-| GRPO-11 | CPPO Completion Pruning — NOT YET (stretch goal) |
-| GRPO-12 | MASPO Soft Trust Region — NOT YET (future) |
+| GRPO-11 | CPPO Completion Pruning — DROPPED |
+| GRPO-12 | MASPO Soft Trust Region — DEFERRED (future research) |
 | GRPO-13 | Transformation Grammar (40 Rules) — DEFERRED TO v2 |
 | GRPO-14 | Full Stacked Architecture (future targets, not hackathon claims) |
 | GRPO-15 | Hackathon Config (15.1) + Future Scale-Up Target (15.2) |
@@ -135,7 +135,7 @@ Window=10, promote >50%, demote <20%. Phase 2-3 include topology-aware graph pro
 
 `make_multi_turn_rollout(max_turns=3, skill_md_gpu=None) -> Callable` — TRL-compatible rollout_func. Stage 3 hackathon uses `max_turns=3-5` per GRPO-15.1.
 
-Flow: generate → `extract_cuda_code()` → `_local_compile_check()` (nvcc syntax, **IMPLEMENTED**) → `_evaluate_on_modal()` (supports both WCC via `evaluate_kernel` and Ops-6K via `evaluate_ops6k_kernel`) → `_compute_reward_from_result()` → `_format_feedback()`. Early exit at reward>=1.6 (log(5.0), i.e. 5x+ speedup).
+Flow: generate → `extract_cuda_code()` → `_local_compile_check()` (nvcc syntax, **IMPLEMENTED**) → `_evaluate_on_modal()` (supports both WCC via `evaluate_kernel` and Ops-6K via `evaluate_ops6k_kernel`) → `_compute_reward_from_result()` → `_format_feedback()`. Early exit at reward >= 3.0 (beats torch.compile).
 
 Local compile fast-path: `nvcc -arch=sm_80 -c` syntax check before Modal. Fails ~50% of early kernels for free, saves A100 eval cost.
 
@@ -231,7 +231,7 @@ Runs stages on Modal cloud GPU. Default: H100 ($3.95/hr, 80GB). Image: CUDA 12.4
 | TRLOO advantage scaling (N/(N-1)) | **DONE** | `custom_grpo_trainer.py` |
 | Local compile fast-path | **DONE** | `multi_turn_rollout.py:_local_compile_check()` |
 | Ops-6K evaluation | **DONE** | `modal_app.py:evaluate_ops6k_kernel()` |
-| Nsight bonus in reward | **DONE** | `reward.py:compute_reward()` (optional kwargs) |
+| Discrete reward {-1,1,2,3} | **DONE** | `reward.py:compute_reward()` |
 | Nsight lightweight profiling | **DONE** | `modal_app.py:evaluate_kernel()` (ptxas occupancy + warp info) |
 | doubleGraph A100 expert dataset | **DONE** | `datasets/doublegraph_*.jsonl` (192 entries) |
 | Real A100 patterns in SKILL.md | **DONE** | `skill_builder.py:_append_a100_patterns()` (7 patterns) |
@@ -240,9 +240,9 @@ Runs stages on Modal cloud GPU. Default: H100 ($3.95/hr, 80GB). Image: CUDA 12.4
 | Evaluator bridge (cascade eval) | **DONE** | `skydiscover_integration/evaluator.py` |
 | AdaEvolve multi-island search | **DONE** | `skydiscover_integration/adaevolve.py` (UCB + breakthrough) |
 | EvoX self-evolving strategies | **DONE** | `skydiscover_integration/evox_strategies.py` (LogWindowScorer) |
-| MARS return-to-go credit | NOT YET (hackathon stretch goal) | `training/custom_grpo_loop.py` (GRPO-4) |
-| CPPO completion pruning | NOT YET (hackathon stretch goal) | (in custom_grpo_loop.py) (GRPO-11) |
-| MASPO soft trust region | NOT YET (future) | `training/maspo_loss.py` (GRPO-12) |
+| MARS return-to-go credit | **DROPPED** (degenerates with outcome rewards) | — (GRPO-4) |
+| CPPO completion pruning | **DROPPED** (harmful for exploration at G=2) | — (GRPO-11) |
+| MASPO soft trust region | DEFERRED (future research) | — (GRPO-12) |
 | ~~Transformation grammar~~ | DEFERRED | v2 — use CUDA-Agent SKILL.md instead (GRPO-13) |
 
 ### Abort Conditions
@@ -273,8 +273,9 @@ KernelForgeObservation(Observation): text, baseline_original_ms, baseline_double
 | Return | Condition |
 |--------|-----------|
 | -1.0 | not compiled OR not execution-correct (compile-only is NOT sufficient per CUDABench) |
-| log(speedup) | fast path: CUDA events timing on A100 + execution correctness |
-| log(speedup) + nsight_bonus | slow path (top-k): + 0.4*occ + 0.3*mem + 0.2*warp from Nsight ncu |
+| 1.0 | correct but not faster than baselines |
+| 2.0 | correct and faster than eager PyTorch (>5%) |
+| 3.0 | correct and faster than torch.compile (>5%) |
 
 `trloo_post_process(advantages, n)` — N/(N-1) gradient correction. **Applied** via `TRLOOGRPOTrainer._compute_advantages()` in Stages 1 & 3.
 
@@ -371,10 +372,10 @@ Modal training app. Runs 3-stage pipeline on H100 ($3.95/hr, 80GB). Smoke test, 
 - **Modal eval**: Full compile + correctness verify + benchmark on A100.
 - **Hybrid escalation** (NOT YET): Turn-based ncu escalation (GRPO-10).
 
-### NOT YET IMPLEMENTED
+### DROPPED / DEFERRED
 
-- CPPO `cheap_cuda_score()` pre-filter (GRPO-11 line 1762): +1 for __global__, +1 __shared__, +1 threadIdx/blockIdx, +2 local nvcc compile; skip Modal if below threshold
-- `reward_monitor.py` uses stale discrete reward thresholds (3.0, -1/+3 bimodal) — needs update for continuous log(speedup)
+- ~~CPPO `cheap_cuda_score()` pre-filter~~ — **DROPPED**: harmful for exploration at G=2; after SFT, heuristic checks provide no value
+- `reward_monitor.py` — **UPDATED** for discrete reward tiers {-1, 1, 2, 3}
 
 ---
 
