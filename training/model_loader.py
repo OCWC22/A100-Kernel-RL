@@ -1,14 +1,12 @@
 """
 Unified model loading for KernelForge training pipeline.
 
-Two paths:
-  Primary: Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active) via HF AutoModelForCausalLM + peft LoraConfig
-           Unsloth cannot do GPTQ-based QLoRA for MoE architectures.
-  Fallback: Qwen3.5-35B-A3B via unsloth.FastLanguageModel (dense model)
+Primary: unsloth/Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active)
+         via Unsloth FastLanguageModel + PatchFastRL for GRPO.
+         bf16 on H200 141GB (~61GB model, ~80GB free for vLLM + GRPO).
+         Unsloth's 2026 Faster MOE update handles MoE LoRA natively.
 
-LoRA targets differ by architecture:
-  MoE: attention + shared_expert only (not all 512 routed experts → ~207GB)
-  Dense: all linear projection layers
+Dev:     Qwen2.5-Coder-0.5B-Instruct for macOS control-plane validation.
 """
 from __future__ import annotations
 
@@ -18,10 +16,8 @@ import sys
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 
-# Primary model (MoE)
-PRIMARY_MODEL = os.getenv("KERNELFORGE_MODEL", "Qwen/Qwen3-Coder-30B-A3B-Instruct")
-# Fallback model (dense)
-FALLBACK_MODEL = os.getenv("KERNELFORGE_FALLBACK_MODEL", "Qwen/Qwen3.5-35B-A3B")
+# Primary model (MoE via Unsloth)
+PRIMARY_MODEL = os.getenv("KERNELFORGE_MODEL", "unsloth/Qwen3-Coder-30B-A3B-Instruct")
 DEV_MODEL = os.getenv("KERNELFORGE_DEV_MODEL", "Qwen/Qwen2.5-Coder-0.5B-Instruct")
 
 # LoRA constants
@@ -29,12 +25,7 @@ LORA_R = 16
 LORA_ALPHA = 16
 LORA_DROPOUT = 0
 
-MOE_LORA_TARGETS = [
-    "q_proj", "k_proj", "v_proj", "o_proj",
-    "shared_expert.gate_proj", "shared_expert.up_proj", "shared_expert.down_proj",
-]
-
-DENSE_LORA_TARGETS = [
+LORA_TARGETS = [
     "q_proj", "k_proj", "v_proj", "o_proj",
     "gate_proj", "up_proj", "down_proj",
 ]
@@ -44,18 +35,16 @@ MAX_SEQ_LENGTH = 8192
 # Singleton cache
 _model = None
 _tokenizer = None
-_model_type = None  # "moe" or "dense"
+_model_type = None  # "moe" or "portable"
 _model_key = None
 
 
 def load_model_and_tokenizer(
-    force_fallback: bool = False,
     checkpoint_path: str | None = None,
 ):
-    """Load model and tokenizer with automatic fallback.
+    """Load model and tokenizer.
 
     Args:
-        force_fallback: Skip primary model, go straight to Qwen2.5.
         checkpoint_path: Load from a fine-tuned checkpoint instead of base model.
 
     Returns:
@@ -64,7 +53,7 @@ def load_model_and_tokenizer(
     global _model, _tokenizer, _model_type, _model_key
 
     resolved_checkpoint = checkpoint_path if checkpoint_path and os.path.exists(checkpoint_path) else None
-    cache_key = resolved_checkpoint or ("fallback" if force_fallback else "primary")
+    cache_key = resolved_checkpoint or "primary"
     if _model is not None and _model_key == cache_key:
         return _model, _tokenizer
 
@@ -73,107 +62,32 @@ def load_model_and_tokenizer(
         _model_key = cache_key
         return _model, _tokenizer
 
-    if not force_fallback:
-        try:
-            if sys.platform != "linux":
-                _model, _tokenizer = _load_portable_dev_model()
-                _model_type = "portable"
-            else:
-                _model, _tokenizer = _load_primary()
-                _model_type = "moe"
-            _model_key = cache_key
-            return _model, _tokenizer
-        except Exception as e:
-            print(f"Primary model ({PRIMARY_MODEL}) failed: {e}")
-            print(f"Falling back to {FALLBACK_MODEL}...")
-
-    _model, _tokenizer = _load_fallback()
-    _model_type = "dense"
+    if sys.platform != "linux":
+        _model, _tokenizer = _load_portable_dev_model()
+        _model_type = "portable"
+    else:
+        _model, _tokenizer = _load_primary()
+        _model_type = "moe"
     _model_key = cache_key
     return _model, _tokenizer
 
 
 def get_model_type() -> str | None:
-    """Return 'moe' or 'dense' depending on which model loaded."""
+    """Return 'moe' or 'portable' depending on which model loaded."""
     return _model_type
 
 
 def _load_primary():
-    """Load primary MoE model via HF AutoModelForCausalLM + peft LoraConfig."""
-    import torch
-    from transformers import AutoModelForCausalLM, AutoTokenizer
-    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    """Load MoE model via Unsloth FastLanguageModel (supports MoE since 2026)."""
+    from unsloth import FastLanguageModel, PatchFastRL
 
     print(f"Loading primary model: {PRIMARY_MODEL}")
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        PRIMARY_MODEL,
-        trust_remote_code=True,
-    )
-    if tokenizer.pad_token is None and tokenizer.eos_token is not None:
-        tokenizer.pad_token = tokenizer.eos_token
-    tokenizer.padding_side = "left"
-
-    # BitsAndBytes 4-bit config for MoE
-    from transformers import BitsAndBytesConfig
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_use_double_quant=True,
-    )
-
-    attn_implementation = "sdpa"
-    try:
-        import flash_attn  # noqa: F401
-
-        attn_implementation = "flash_attention_2"
-    except Exception:
-        pass
-
-    model = AutoModelForCausalLM.from_pretrained(
-        PRIMARY_MODEL,
-        quantization_config=bnb_config,
-        device_map="auto",
-        trust_remote_code=True,
-        torch_dtype=torch.bfloat16,
-        attn_implementation=attn_implementation,
-    )
-
-    model = prepare_model_for_kbit_training(model)
-
-    lora_config = LoraConfig(
-        r=LORA_R,
-        lora_alpha=LORA_ALPHA,
-        lora_dropout=LORA_DROPOUT,
-        target_modules=MOE_LORA_TARGETS,
-        bias="none",
-        task_type="CAUSAL_LM",
-    )
-
-    model = get_peft_model(model, lora_config)
-    model.gradient_checkpointing_enable()
-
-    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total = sum(p.numel() for p in model.parameters())
-    print(f"Primary model loaded: {trainable:,} trainable / {total:,} total params "
-          f"({trainable / total * 100:.2f}%)")
-
-    return model, tokenizer
-
-
-def _load_fallback():
-    """Load Qwen2.5-Coder-7B-Instruct via Unsloth FastLanguageModel."""
-    from unsloth import FastLanguageModel, PatchFastRL
-
-    print(f"Loading fallback model: {FALLBACK_MODEL}")
-
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=FALLBACK_MODEL,
+        model_name=PRIMARY_MODEL,
         max_seq_length=MAX_SEQ_LENGTH,
-        load_in_4bit=True,
-        load_in_8bit=False,
-        full_finetuning=False,
+        load_in_4bit=False,      # bf16 on H200 141GB (~61GB model, ~80GB free)
+        fast_inference=False,     # MoE vLLM not supported yet by Unsloth
     )
     if tokenizer.pad_token is None and tokenizer.eos_token is not None:
         tokenizer.pad_token = tokenizer.eos_token
@@ -182,15 +96,21 @@ def _load_fallback():
     model = FastLanguageModel.get_peft_model(
         model,
         r=LORA_R,
-        target_modules=DENSE_LORA_TARGETS,
+        target_modules=LORA_TARGETS,
         lora_alpha=LORA_ALPHA,
         lora_dropout=LORA_DROPOUT,
-        use_gradient_checkpointing="unsloth",
+        use_gradient_checkpointing=True,  # "unsloth" not supported for MoE
+        random_state=3407,
+        bias="none",
     )
 
     PatchFastRL("GRPO", FastLanguageModel)
 
-    print(f"Fallback model loaded: {FALLBACK_MODEL}")
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    print(f"Primary model loaded: {trainable:,} trainable / {total:,} total params "
+          f"({trainable / total * 100:.2f}%)")
+
     return model, tokenizer
 
 
@@ -219,29 +139,30 @@ def _load_portable_dev_model():
 
 
 def _load_from_checkpoint(checkpoint_path: str):
-    """Load a fine-tuned checkpoint (works for both MoE and dense)."""
+    """Load a fine-tuned checkpoint."""
     import torch
 
     print(f"Loading checkpoint: {checkpoint_path}")
 
-    # Try Unsloth first (works for both if saved via Unsloth)
+    # Try Unsloth first (primary path)
     try:
-        from unsloth import FastLanguageModel
+        from unsloth import FastLanguageModel, PatchFastRL
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=checkpoint_path,
             max_seq_length=MAX_SEQ_LENGTH,
-            load_in_4bit=True,
+            load_in_4bit=False,
         )
         if tokenizer.pad_token is None and tokenizer.eos_token is not None:
             tokenizer.pad_token = tokenizer.eos_token
         tokenizer.padding_side = "left"
+        PatchFastRL("GRPO", FastLanguageModel)
         print(f"Loaded checkpoint via Unsloth: {checkpoint_path}")
         return model, tokenizer
     except Exception:
         pass
 
     # Fall back to HF + PEFT
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
 
     tokenizer = AutoTokenizer.from_pretrained(checkpoint_path, trust_remote_code=True)
@@ -249,21 +170,13 @@ def _load_from_checkpoint(checkpoint_path: str):
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_quant_type="nf4",
-        bnb_4bit_compute_dtype=torch.bfloat16,
-    )
-
     model = AutoModelForCausalLM.from_pretrained(
         checkpoint_path,
-        quantization_config=bnb_config,
         device_map="auto",
         trust_remote_code=True,
         torch_dtype=torch.bfloat16,
     )
 
-    # Try loading PEFT adapter if present
     try:
         model = PeftModel.from_pretrained(model, checkpoint_path)
         print(f"Loaded PEFT adapter from {checkpoint_path}")

@@ -1,8 +1,8 @@
 """
 Modal training app — runs the 3-stage GRPO pipeline on cloud GPU.
 
-Default: B200 (192GB, $6.25/hr on Modal). FP8 for Qwen3-Coder-Next 80B.
-A100 (Modal) handles all eval/reward. You cannot optimize A100 perf by measuring on B200.
+Default: H200 (141GB, $4.54/hr on Modal). bf16 for Qwen3-Coder-30B-A3B-Instruct via Unsloth.
+A100 (Modal) handles all eval/reward. You cannot optimize A100 perf by measuring on H200.
 
 Usage:
     # Stage 1 warmup (default)
@@ -17,7 +17,7 @@ Usage:
 import os
 import modal
 
-TRAIN_GPU = os.getenv("KERNELFORGE_TRAIN_GPU", "B200")
+TRAIN_GPU = os.getenv("KERNELFORGE_TRAIN_GPU", "H200")
 APP_NAME = os.getenv("KERNELFORGE_TRAIN_APP", "kernelforge-train")
 
 train_image = (

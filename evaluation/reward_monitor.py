@@ -13,6 +13,7 @@ Reference: arXiv 2507.05619 (Detecting and Mitigating Reward Hacking)
 """
 from __future__ import annotations
 
+import math
 from collections import Counter
 
 

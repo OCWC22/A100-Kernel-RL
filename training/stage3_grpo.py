@@ -1,9 +1,9 @@
 """
 Stage 3: GRPO with Curriculum — hackathon pilot (50 steps).
 
-GPU split: H100 handles model weights + generation + gradient updates.
+GPU split: H200 handles model weights + generation + gradient updates.
            A100 (Modal) handles all performance reward (speedup, correctness).
-           You cannot optimize A100 performance by measuring on H100.
+           You cannot optimize A100 performance by measuring on H200.
 
 Multi-turn agentic training via TRL's rollout_func:
   - 3-5 turns per episode
@@ -23,6 +23,8 @@ See docs/GRPO_DEEP_DIVE.md GRPO-15.1 for hackathon configuration.
 from __future__ import annotations
 
 import os
+os.environ.setdefault('UNSLOTH_VLLM_STANDBY', '1')  # 30%+ memory savings for RL
+
 import sys
 from pathlib import Path
 
@@ -54,9 +56,8 @@ USE_BF16 = IS_LINUX
 # Multi-turn configuration
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "5"))
 MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "50"))
-# H100 local compile check for fast-fail; Modal A100 for performance reward.
-# Set LOCAL_COMPILE_CHECK=0 to skip local compile pre-check (slower but simpler).
-LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_STAGE3_LOCAL_COMPILE", "1") == "1"
+# Local compile check controlled by KERNELFORGE_LOCAL_COMPILE in multi_turn_rollout.py.
+# Set KERNELFORGE_LOCAL_COMPILE=0 to skip local compile pre-check (slower but simpler).
 
 
 # Global curriculum manager — shared between reward function and training loop

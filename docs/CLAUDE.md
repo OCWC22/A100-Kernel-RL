@@ -6,9 +6,9 @@ Per-second billing, no minimum. $30/month free credits on Starter plan.
 
 | GPU | VRAM | Arch | $/second | $/hour | Use Case |
 |-----|------|------|----------|--------|----------|
-| H200 | 141 GB HBM3e | sm_90 | $0.001261 | $4.54 | Training (alternative — fits but tight, ~41GB free) |
+| **H200** | 141 GB HBM3e | sm_90 | $0.001261 | **$4.54** | **Training** (primary — Qwen3-Coder-30B-A3B bf16, ~80GB free) |
 | B200 | 192 GB HBM3e | sm_100 | $0.001736 | $6.25 | Future scale-up (Qwen3-Coder-Next 80B FP8) |
-| **H100** | 80 GB HBM3 | sm_90a | $0.001097 | **$3.95** | **Training** (primary — Qwen3-Coder-30B-A3B-Instruct fits with ~46-50GB free) |
+| H100 | 80 GB HBM3 | sm_90a | $0.001097 | $3.95 | Training (fallback — requires 4-bit quant) |
 | RTX PRO 6000 | 48 GB GDDR7 | ada | $0.000842 | $3.03 | Inference |
 | **A100 80GB** | 80 GB HBM2e | sm_80 | $0.000694 | **$2.50** | **Eval/reward** (target GPU) |
 | A100 40GB | 40 GB HBM2e | sm_80 | $0.000583 | $2.10 | Eval (budget) |
@@ -21,14 +21,14 @@ Per-second billing, no minimum. $30/month free credits on Starter plan.
 
 | Component | GPU | Hours | $/hr | Cost |
 |-----------|-----|-------|------|------|
-| SFT warmup | H100 | 2.0 | $3.95 | $7.90 |
-| Stage 1 warmup (100 steps) | H100 | 3.5 | $3.95 | $13.83 |
-| Stage 2 RFT | H100 | 0.5 | $3.95 | $1.98 |
-| Stage 3 GRPO pilot (50 steps) | H100 | 2.0 | $3.95 | $7.90 |
+| SFT warmup | H200 | 2.0 | $4.54 | $9.08 |
+| Stage 1 warmup (100 steps) | H200 | 3.5 | $4.54 | $15.89 |
+| Stage 2 RFT | H200 | 0.5 | $4.54 | $2.27 |
+| Stage 3 GRPO pilot (50 steps) | H200 | 2.0 | $4.54 | $9.08 |
 | Eval calls (~400 calls) | A100 80GB | 4.0 | $2.50 | $10.00 |
 | Search / best-of-N + SkyDiscover | A100 80GB | 3.0 | $2.50 | $7.50 |
-| Testing/debugging | H100 | 3.0 | $3.95 | $11.85 |
-| **Total** | | **~18** | | **~$61-100** |
+| Testing/debugging | H200 | 3.0 | $4.54 | $13.62 |
+| **Total** | | **~18** | | **~$67-110** |
 | **Budget ceiling** | | | | **$200** |
 
 Source: [modal.com/pricing](https://modal.com/pricing)
@@ -39,7 +39,7 @@ Source: [modal.com/pricing](https://modal.com/pricing)
 
 | File | Lines | Size | Content |
 |------|-------|------|---------|
-| `KERNELFORGE_FINAL_PRD.md` | ~1,700 | ~90KB | Hackathon PRD — single source of truth (hackathon-first framing, H100+A100, Qwen3-Coder-30B-A3B-Instruct) |
+| `KERNELFORGE_FINAL_PRD.md` | ~1,700 | ~90KB | Hackathon PRD — single source of truth (hackathon-first framing, H200+A100, Qwen3-Coder-30B-A3B-Instruct via Unsloth) |
 | `GRPO_DEEP_DIVE.md` | ~2,400 | ~95KB | Algorithm math, memory budgets, hackathon config (GRPO-15 split: hackathon + future scale-up) |
 
 ## PRD Section Map (`KERNELFORGE_FINAL_PRD.md`)
@@ -91,9 +91,9 @@ Source: [modal.com/pricing](https://modal.com/pricing)
 
 ## training/ — 3-Stage RL Pipeline
 
-**Model**: Qwen/Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active, 4-bit on H100 80GB), fallback Qwen/Qwen3.5-35B-A3B
+**Model**: unsloth/Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active, bf16 on H200 141GB via Unsloth FastLanguageModel)
 
-> **GPU Split:** **H100** ($3.95/hr) = model weights + generation + gradient updates + local compile checks. **A100 (Modal) = all performance reward** (speedup timing, execution correctness, Nsight profiling). H100 timing ≠ A100 timing.
+> **GPU Split:** **H200** ($4.54/hr, 141GB) = model weights + generation + gradient updates + local compile checks. **A100 (Modal) = all performance reward** (speedup timing, execution correctness, Nsight profiling). H200 timing ≠ A100 timing.
 
 ### Stage Configs
 
@@ -118,7 +118,7 @@ Shared: bf16=True, max_prompt=512, top_k=50, top_p=0.95, rep_penalty=1.05, vllm 
 
 ### LoRA (`model_loader.py`)
 
-r=16, alpha=16, dropout=0, max_seq=8192, nf4 4-bit double_quant bf16. MoE targets: q/k/v/o_proj + shared_expert.gate/up/down_proj. Dense targets: q/k/v/o_proj + gate/up/down_proj.
+r=16, alpha=16, dropout=0, max_seq=8192, bf16 (no quant on H200). Targets: q/k/v/o_proj + gate/up/down_proj (Unsloth handles MoE routing). gradient_checkpointing=True.
 
 ### Curriculum (`curriculum.py`)
 
@@ -218,7 +218,7 @@ Launch: `./skydiscover_integration/run_evolution.sh` (uses AdaEvolve, not extern
 
 ### Modal Training (`modal_train.py`, project root) — IMPLEMENTED
 
-Runs stages on Modal cloud GPU. Default: H100 ($3.95/hr, 80GB). Image: CUDA 12.4 + torch + trl[vllm]==0.29.0 + transformers + peft + flash-attn.
+Runs stages on Modal cloud GPU. Default: H200 ($4.54/hr, 141GB). Image: CUDA 12.4 + torch + trl[vllm]==0.29.0 + transformers + peft + flash-attn + unsloth.
 
 - `modal run modal_train.py --stage 0` — smoke test (model load, dataset, generation, eval endpoint)
 - `modal run modal_train.py --stage 1 --max-steps 10` — Stage 1 warmup
@@ -364,7 +364,7 @@ H1: multi-stage > base. H2: RFT necessary (skip → collapse). H3: SKILL.md > ge
 
 ### modal_train.py (project root) — IMPLEMENTED
 
-Modal training app. Runs 3-stage pipeline on H100 ($3.95/hr, 80GB). Smoke test, dry run, and full training modes.
+Modal training app. Runs 3-stage pipeline on H200 ($4.54/hr, 141GB). Smoke test, dry run, and full training modes.
 
 ### Eval Strategy
 

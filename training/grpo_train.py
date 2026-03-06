@@ -49,13 +49,14 @@ def preflight() -> None:
             f"{missing_str}. Install them with `uv sync --extra train --extra modal --extra openenv`."
         )
 
-    import modal
-
-    if not getattr(modal.config, "token_id", None):
-        raise RuntimeError(
-            "Modal authentication is not configured. Run `modal token new` or `modal setup` "
-            "before starting GRPO training."
-        )
+    try:
+        import modal
+        if not getattr(modal.config, "token_id", None):
+            print("WARNING: Modal authentication not configured. "
+                  "Run `modal token new` or set MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env vars. "
+                  "Training will fail at evaluation time without Modal auth.")
+    except ImportError:
+        print("WARNING: modal package not installed. Eval dispatch will fail.")
 
     summary = _dataset_summary()
     print("Dataset summary:")

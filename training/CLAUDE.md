@@ -2,16 +2,16 @@
 
 ## GPU Split
 
-> **H100** ($3.95/hr) = model weights + generation + gradient updates + local nvcc compile checks (fast-fail).
+> **H200** ($4.54/hr, 141GB HBM3e) = model weights + generation + gradient updates + local nvcc compile checks (fast-fail).
 > **A100 (Modal)** = all performance reward (speedup timing, execution-based correctness, Nsight profiling).
-> H100 timing ≠ A100 timing. Never use H100 execution for performance reward.
+> H200 timing ≠ A100 timing. Never use H200 execution for performance reward.
 
 ## Model
 
-- **Primary**: Qwen/Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active, 4-bit on H100 80GB)
-- **Fallback**: Qwen/Qwen3.5-35B-A3B
-- **Env vars**: `PRIMARY_MODEL`, `FALLBACK_MODEL` in `model_loader.py`
-- **Note**: `model_loader.py` uses NF4 4-bit via bitsandbytes (works on any GPU). FP8 for future B200 scale-up.
+- **Primary**: unsloth/Qwen3-Coder-30B-A3B-Instruct (30.5B MoE, 3.3B active, bf16 on H200 141GB)
+- **Loaded via**: Unsloth `FastLanguageModel` + `PatchFastRL("GRPO")` (Faster MOE 2026 update)
+- **Env var**: `KERNELFORGE_MODEL` in `model_loader.py`
+- **Note**: bf16 (no quantization) on H200. ~61GB model → ~80GB free for vLLM + GRPO.
 
 ## Stage Configs
 
@@ -37,9 +37,9 @@
 | alpha | 16 |
 | dropout | 0 |
 | max_seq_length | 8192 |
-| quant | nf4 4-bit, double_quant, bf16 compute |
-| **MoE targets** | q/k/v/o_proj, shared_expert.gate/up/down_proj |
-| **Dense targets** | q/k/v/o_proj, gate/up/down_proj |
+| quant | bf16 (no quant on H200 141GB) |
+| **targets** | q/k/v/o_proj, gate/up/down_proj (Unsloth handles MoE routing) |
+| **gradient_checkpointing** | True (not "unsloth" — MoE limitation) |
 
 ## Curriculum (`curriculum.py`)
 

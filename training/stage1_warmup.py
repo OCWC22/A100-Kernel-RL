@@ -3,18 +3,18 @@ Stage 1: GRPO Warm-up — bootstrap CUDA syntax on easy operators.
 
 Multi-turn agentic training via TRL's rollout_func:
   - 3 turns per episode (model sees errors, iterates)
-  - Higher temperature (0.9) for exploration
-  - Lower LR (3e-6) to avoid catastrophic forgetting
+  - Temperature 1.0 for exploration
+  - LR 2e-6 to avoid catastrophic forgetting
   - beta=0.0 (no KL penalty — let model explore freely)
-  - 300 max_steps (was 100; increased for multi-turn budget)
+  - G=2 generations, 100 max_steps (hackathon config)
   - vLLM colocate mode for generation
 
 Dataset: CUDA-Agent-Ops-6K easy operators (single-op subset).
-See docs/TRAINING_PLAN.md for full rationale.
 """
+import os
+os.environ.setdefault('UNSLOTH_VLLM_STANDBY', '1')  # 30%+ memory savings for RL
 from __future__ import annotations
 
-import os
 import sys
 from pathlib import Path
 
@@ -41,7 +41,7 @@ USE_BF16 = IS_LINUX
 
 # Multi-turn configuration
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE1_MAX_TURNS", "3"))
-MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "300"))
+MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "100"))
 
 
 # --- Dataset loading ---
@@ -113,9 +113,9 @@ def main():
     )
 
     config = GRPOConfig(
-        learning_rate=3e-6,
-        temperature=0.9,         # High exploration
-        num_generations=4,
+        learning_rate=2e-6,
+        temperature=1.0,         # High exploration
+        num_generations=2,
         max_prompt_length=4096,
         max_completion_length=4096,
         per_device_train_batch_size=1,
