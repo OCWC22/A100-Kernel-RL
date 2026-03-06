@@ -21,6 +21,12 @@ REQUIRED_PACKAGES = ("trl", "transformers", "torch", "modal")
 if sys.platform.startswith("linux"):
     REQUIRED_PACKAGES += ("peft",)
 
+ROOT = Path(__file__).resolve().parents[1]
+REQUIRED_ASSETS = (
+    ROOT / "datasets" / "doublegraph_sft.jsonl",
+    ROOT / "docs" / "research" / "doublegraph" / "doublegraph_a100_manifest.jsonl",
+)
+
 
 def _check_dependencies(packages: Iterable[str] = REQUIRED_PACKAGES) -> list[str]:
     """Return a list of missing Python packages."""
@@ -39,6 +45,14 @@ def _dataset_summary() -> dict[str, dict[str, int]]:
     return summarize_tasks(rows)
 
 
+def _missing_assets() -> list[str]:
+    missing: list[str] = []
+    for path in REQUIRED_ASSETS:
+        if not path.exists():
+            missing.append(str(path))
+    return missing
+
+
 def preflight() -> None:
     """Run non-destructive checks before training."""
     missing = _check_dependencies()
@@ -47,6 +61,14 @@ def preflight() -> None:
         raise RuntimeError(
             "Missing required training dependencies: "
             f"{missing_str}. Install them with `uv sync --extra train --extra modal --extra openenv`."
+        )
+
+    missing_assets = _missing_assets()
+    if missing_assets:
+        missing_str = ", ".join(missing_assets)
+        raise RuntimeError(
+            "Missing required training assets: "
+            f"{missing_str}. Ensure the DoubleGraph manifest and SFT priors are present before launching RL."
         )
 
     try:

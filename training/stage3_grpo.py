@@ -23,10 +23,10 @@ See docs/GRPO_DEEP_DIVE.md GRPO-15.1 for hackathon configuration.
 from __future__ import annotations
 
 import os
-os.environ.setdefault('UNSLOTH_VLLM_STANDBY', '1')  # 30%+ memory savings for RL
-
 import sys
 from pathlib import Path
+
+os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
 
 if __package__ in {None, ""}:
     ROOT = Path(__file__).resolve().parents[1]
@@ -38,7 +38,7 @@ from trl import GRPOConfig
 from training.custom_grpo_trainer import TRLOOGRPOTrainer
 from training.model_loader import load_model_and_tokenizer
 from training.curriculum import CurriculumManager, format_problem_prompt
-from training.dataset_loader import Dataset, load_training_dataset
+from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
 from training.multi_turn_rollout import make_multi_turn_rollout
 from training.task_support import normalize_task_row
 
@@ -83,6 +83,12 @@ def reward_from_env_with_curriculum(completions, **kwargs) -> list[float]:
 
 # --- Dataset: curriculum-aware prompt generation ---
 
+
+def _dataset_from_rows(rows: list[dict]) -> Dataset:
+    if hasattr(Dataset, "from_list"):
+        return Dataset.from_list(rows)
+    return MiniDataset(rows)
+
 def build_curriculum_dataset(num_prompts: int = 200) -> tuple[Dataset, list[dict]]:
     """Generate prompts from curriculum manager, sampling from current phase."""
     prompts = []
@@ -110,7 +116,7 @@ def build_curriculum_dataset(num_prompts: int = 200) -> tuple[Dataset, list[dict
         sampled["prompt"] = format_problem_prompt(sampled)
         prompts.append(sampled)
         sampled_rows.append(sampled)
-    return Dataset.from_list(prompts), sampled_rows
+    return _dataset_from_rows(prompts), sampled_rows
 
 
 # --- Training ---

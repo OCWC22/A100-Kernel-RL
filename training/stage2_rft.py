@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 if __package__ in {None, ""}:
     ROOT = Path(__file__).resolve().parents[1]
@@ -21,6 +22,7 @@ if __package__ in {None, ""}:
 
 from trl import SFTConfig, SFTTrainer
 
+from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
 from training.model_loader import load_model_and_tokenizer
 from training.rft_filter import TrajectoryCollector
 
@@ -29,6 +31,32 @@ OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2"
 NUM_TRAJECTORIES = int(os.getenv("KERNELFORGE_RFT_TRAJECTORIES", "50"))
 MIN_REWARD = float(os.getenv("KERNELFORGE_RFT_MIN_REWARD", "1.0"))
 USE_BF16 = sys.platform.startswith("linux")
+
+
+def _dataset_from_rows(rows: list[dict[str, Any]]) -> Dataset:
+    if hasattr(Dataset, "from_list"):
+        return Dataset.from_list(rows)
+    return MiniDataset(rows)
+
+
+def _messages_to_text(messages: list[dict[str, Any]]) -> str:
+    chunks: list[str] = []
+    for message in messages:
+        role = str(message.get("role", "user"))
+        content = str(message.get("content", ""))
+        chunks.append(f"<|{role}|>\n{content}")
+    return "\n".join(chunks)
+
+
+def _load_doublegraph_sft_rows() -> list[dict[str, Any]]:
+    rows = load_training_dataset(stage="stage2")
+    formatted: list[dict[str, Any]] = []
+    for row in rows:
+        messages = row.get("messages") or []
+        text = row.get("text") or _messages_to_text(messages)
+        if text:
+            formatted.append({**row, "text": text})
+    return formatted
 
 
 def main():
@@ -49,6 +77,14 @@ def main():
     # Step 3: Save filtered dataset
     os.makedirs("datasets", exist_ok=True)
     rft_dataset = collector.save_rft_dataset(filtered, "datasets/rft_filtered.jsonl")
+    rft_rows = rft_dataset.to_list() if hasattr(rft_dataset, "to_list") else list(rft_dataset)
+    dg_sft_rows = _load_doublegraph_sft_rows()
+    combined_sft_rows = dg_sft_rows + rft_rows
+    train_dataset = _dataset_from_rows(combined_sft_rows)
+    print(
+        f"Merged Stage 2 SFT corpus: doubleGraph={len(dg_sft_rows)} + "
+        f"filtered_trajectories={len(rft_rows)} -> total={len(combined_sft_rows)}"
+    )
 
     # Step 4: Load model from Stage 1 checkpoint and train
     print(f"Loading Stage 1 checkpoint from {STAGE1_OUTPUT}...")
@@ -72,7 +108,7 @@ def main():
         model=model,
         processing_class=tokenizer,
         args=config,
-        train_dataset=rft_dataset,
+        train_dataset=train_dataset,
         dataset_text_field="text",
     )
 

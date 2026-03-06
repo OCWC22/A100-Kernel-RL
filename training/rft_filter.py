@@ -21,6 +21,8 @@ from training.task_support import (
     evaluate_code_on_modal,
     normalize_task_row,
 )
+from training.curriculum import format_topology_context
+from openenv_env.skill_builder import build_skill_md
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
@@ -74,7 +76,11 @@ class TrajectoryCollector:
     def _run_single_trajectory(self, task: dict[str, Any], trajectory_id: int) -> dict[str, Any] | None:
         """Run one prompt -> generation -> evaluation trajectory."""
         try:
-            prompt = build_generation_prompt(task)
+            prompt = build_generation_prompt(
+                task,
+                skill_context=build_skill_md(TARGET_GPU.lower()),
+                topology_context=format_topology_context(task),
+            )
             model_output = self._get_model_response(prompt)
             code = extract_cuda_code(model_output)
             if not code:

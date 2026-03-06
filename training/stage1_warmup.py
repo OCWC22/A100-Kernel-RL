@@ -11,12 +11,13 @@ Multi-turn agentic training via TRL's rollout_func:
 
 Dataset: CUDA-Agent-Ops-6K easy operators (single-op subset).
 """
-import os
-os.environ.setdefault('UNSLOTH_VLLM_STANDBY', '1')  # 30%+ memory savings for RL
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+
+os.environ.setdefault("UNSLOTH_VLLM_STANDBY", "1")
 
 if __package__ in {None, ""}:
     ROOT = Path(__file__).resolve().parents[1]
@@ -26,7 +27,7 @@ if __package__ in {None, ""}:
 from trl import GRPOConfig
 
 from training.custom_grpo_trainer import TRLOOGRPOTrainer
-from training.dataset_loader import Dataset, load_training_dataset
+from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
 from training.model_loader import load_model_and_tokenizer
 from training.multi_turn_rollout import make_multi_turn_rollout, reward_from_env
 from training.task_support import normalize_task_row
@@ -46,6 +47,13 @@ MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "100"))
 
 # --- Dataset loading ---
 
+
+def _dataset_from_rows(rows: list[dict]) -> Dataset:
+    if hasattr(Dataset, "from_list"):
+        return Dataset.from_list(rows)
+    return MiniDataset(rows)
+
+
 def load_stage1_dataset() -> Dataset:
     """Load stage1 prompts from unified dataset loader, with safe fallback."""
 
@@ -56,14 +64,14 @@ def load_stage1_dataset() -> Dataset:
             ops6k_max=max_samples,
             seed=42,
         )
-        if isinstance(ds, Dataset) and len(ds) > 0:
+        if len(ds) > 0:
             print(f"Loaded {len(ds)} unified Stage 1 prompts")
-            return ds.shuffle(seed=42)
+            return ds.shuffle(seed=42) if hasattr(ds, "shuffle") else ds
     except Exception as e:
         print(f"Could not load Ops-6K for Stage 1: {e}")
 
     print("Using fallback Stage 1 prompts with live WCC evaluation support")
-    return Dataset.from_list([
+    return _dataset_from_rows([
         {
             "prompt": (
                 f"Write a CUDA Weakly Connected Components kernel for {TARGET_GPU} ({TARGET_ARCH}) "

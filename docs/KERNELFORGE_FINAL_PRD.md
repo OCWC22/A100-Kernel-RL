@@ -384,6 +384,112 @@ kernelforge/
 
 ---
 
+## 8.5 Current Implementation Snapshot (March 6, 2026)
+
+This section is the **live status tracker** for what is actually implemented in the repo today. It is meant to keep the team aligned on what is done, what is partially done, and what is still blocking a real RL launch.
+
+### 8.5.1 Launch-readiness status
+
+| Area | Status | Notes |
+|------|--------|-------|
+| OpenEnv-compatible environment contract | **Partial** | The repo has `openenv_env/kernel_forge_env.py` with `step()/reset()/state()` wiring aligned with the OpenEnv interface, but the PRD-level `openenv_wrapper/` package is not the authoritative implementation path yet. OpenEnv interface reference: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv repo](https://github.com/meta-pytorch/OpenEnv). |
+| Reward loop (compile → correctness → timing → reward) | **Partial** | The code routes tasks to Modal-backed evaluators and computes canonical rewards, but end-to-end correctness/timing readiness still depends on live Modal auth plus remote A100 execution. |
+| DoubleGraph prior integration | **Done for prompt/data priors** | The repo already ships a DoubleGraph manifest, topology-aware curriculum tasks, dynamic `skills.md` augmentation, and Stage 2 SFT priors derived from DoubleGraph. Runtime doubleGraph wheel install remains optional. Source: [doubleGraph repo](https://github.com/double-ai/doubleGraph). |
+| `skills.md` integration | **Done** | Skill context is injected into rollout generation and Stage 2 trajectory collection; dynamic Hopper/H200 skill generation is now supported. |
+| Curated dataset integration | **Done** | `datasets/build_combined_dataset.py` merges DoubleGraph manifest rows with CUDA-Agent-style operator tasks; `training/dataset_loader.py` routes Stage 1/2/3 data appropriately. Source: [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K). |
+| Stage 1 warmup entrypoint | **Done** | Startup/import issues were fixed and fallback dataset handling is now robust. |
+| Stage 2 RFT / SFT | **Done, but needs real run** | Stage 2 now merges filtered trajectories with DoubleGraph SFT priors before training. |
+| Stage 3 GRPO pilot | **Done, but needs real run** | Startup/import issues were fixed; curriculum dataset creation works with both HF-style and fallback datasets. |
+| H200 training support | **Done in code** | The current codebase now supports H200 in the GPU registry and dynamic skill generation, matching Hopper/H200 training intent. H200 product reference: [NVIDIA H200](https://www.nvidia.com/en-us/data-center/h200/). |
+| Modal training image / remote asset wiring | **Done** | The training image now includes `openenv-core` and ships the dataset / manifest assets needed by the loader on remote runs. |
+| Preflight / fail-fast validation | **Done** | `training/grpo_train.py --preflight-only` now validates dependencies and required assets before launch. |
+| Modal authentication | **Blocked externally** | Preflight currently passes, but actual training remains blocked until Modal credentials are configured. |
+
+### 8.5.2 What is done right now
+
+- **[done]** `training/stage1_warmup.py` is runnable in principle and no longer fails on invalid `__future__` import ordering.
+- **[done]** `training/stage3_grpo.py` is runnable in principle and no longer fails on invalid `__future__` import ordering.
+- **[done]** `openenv_env/gpu_registry.py` includes H200, so Hopper-class training targets are explicit in code.
+- **[done]** `openenv_env/skill_builder.py` generates Hopper/H200 skill context, while A100 retains the DoubleGraph-specific appended expert patterns.
+- **[done]** `training/rft_filter.py` now uses the same `skills.md` + topology-aware prompt construction style as the RL rollout path.
+- **[done]** `training/stage2_rft.py` now merges DoubleGraph SFT prior rows with filtered trajectories instead of training only on collected rollouts.
+- **[done]** `modal_train.py` now ships dataset assets and the DoubleGraph manifest into the Modal training image.
+- **[done]** `training/grpo_train.py` now performs asset-aware preflight checks before launch.
+
+### 8.5.3 What is partially done
+
+- **[partial]** The environment is coded, but the real judge story depends on a full, reproducible remote execution path and a clean demo wrapper.
+- **[partial]** The reward loop is implemented in code paths, but still requires successful live Modal A100 evals to be considered benchmark-ready.
+- **[partial]** The combined dataset path works, but current preflight output shows a relatively small supported live-eval subset in the local fallback case, so real task coverage still depends on the full upstream dataset and remote evaluator availability.
+- **[partial]** The repo contains topology-aware graph tasks and DoubleGraph priors, but only a subset currently routes to live evaluation backends today.
+
+### 8.5.4 What is not done yet
+
+- **[not done]** A verified end-to-end Stage 1 remote training run on Modal H200/Hopper.
+- **[not done]** A verified Stage 2 run producing a checkpoint from real collected trajectories.
+- **[not done]** A verified Stage 3 GRPO run producing real reward-bearing updates against remote A100 evaluation.
+- **[not done]** A final launch checklist proving compile rate, correctness rate, reward variance, and wall-clock eval throughput are good enough for hackathon demo use.
+- **[not done]** A final claim table separating implemented / tested / benchmarked / projected results for pitch/demo use.
+
+### 8.5.5 Immediate blockers
+
+1. **Modal authentication is not configured.**
+   - Without valid `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` or equivalent `modal token new` setup, training cannot execute live reward evaluation.
+2. **Remote run validation is still outstanding.**
+   - The code now passes preflight locally, but the actual remote Stage 0 / Stage 1 / Stage 2 / Stage 3 runs have not yet been validated in this PRD.
+3. **Evaluator coverage is still narrower than the long-term story.**
+   - Current live routing mainly covers WCC plus the stateless subset of Ops-6K-style tasks, not the full kernel/task universe.
+
+### 8.5.6 Immediate next tasks (execution order)
+
+#### Task A: Unblock remote execution
+- **Status:** Not done
+- **Owner:** Infra
+- **Subtasks:**
+  - Configure Modal credentials locally.
+  - Verify `modal run modal_train.py --stage 0` completes successfully.
+  - Verify the remote training image can see `/root/datasets` and `/root/docs/research/doublegraph`.
+- **Done when:** Stage 0 smoke test passes on remote GPU.
+
+#### Task B: Validate Stage 1 warmup on remote GPU
+- **Status:** Not done
+- **Owner:** Training
+- **Subtasks:**
+  - Run Stage 1 with a low step count first.
+  - Verify model load, dataset load, rollout generation, local compile fast-fail, and remote reward dispatch.
+  - Confirm checkpoints are written to the Modal volume.
+- **Done when:** A short Stage 1 run finishes and saves a checkpoint.
+
+#### Task C: Validate Stage 2 RFT/SFT merge path
+- **Status:** Not done
+- **Owner:** Training
+- **Subtasks:**
+  - Collect a small trajectory set from the Stage 1 checkpoint.
+  - Verify filtered trajectories are merged with DoubleGraph SFT prior rows.
+  - Confirm `SFTTrainer` can train on the merged dataset without schema issues.
+- **Done when:** Stage 2 produces a checkpoint and logs merged dataset counts.
+
+#### Task D: Validate Stage 3 GRPO pilot
+- **Status:** Not done
+- **Owner:** Training
+- **Subtasks:**
+  - Run Stage 3 with low `max_steps` first.
+  - Confirm curriculum sampling, reward extraction, and checkpoint resume behavior.
+  - Inspect reward distribution for collapse / zero-signal behavior.
+- **Done when:** Stage 3 completes a short run with non-trivial reward output.
+
+#### Task E: Benchmark launch readiness
+- **Status:** Not done
+- **Owner:** Evaluation
+- **Subtasks:**
+  - Measure compile rate after Stage 1.
+  - Measure correctness rate after Stage 2.
+  - Measure reward variance / improvement signal during Stage 3.
+  - Record eval throughput and cost on the real remote setup.
+- **Done when:** We can decide truthfully whether to ship `environment + SFT + search` or `environment + SFT + GRPO`.
+
+---
+
 ## 9. Complete Task List
 
 ### PHASE 0: PREP (Wednesday-Friday, before hackathon)

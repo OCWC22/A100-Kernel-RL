@@ -86,7 +86,7 @@ Allowed: --use_fast_math, --maxrregcount=N (16-128),
 - Memory coalescing: consecutive threads access consecutive addresses
 - __ldg() for read-only data via texture cache path
 """
-    elif gpu_name.lower() == "h100":
+    elif gpu_name.lower() in {"h100", "h200"}:
         skill += f"""- TMA (Tensor Memory Accelerator): bulk async copy from global to shared.
   One thread initiates copy, 127 freed for computation. 1.45 TB/s.
 - Distributed shared memory: SMs in a cluster access each other's SMEM.

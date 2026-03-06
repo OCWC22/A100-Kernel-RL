@@ -33,6 +33,7 @@ train_image = (
         "accelerate>=1.4.0",
         "peft>=0.14",
         "bitsandbytes>=0.45",
+        "openenv-core[core]>=0.2.1",
         "numpy>=1.26",
         "modal>=0.70",
         "flash-attn>=2.7",
@@ -42,6 +43,9 @@ train_image = (
     .add_local_python_source(
         "training", "openenv_env", "evaluation", "verification",
     )
+    .add_local_dir("datasets", remote_path="/root/datasets")
+    .add_local_dir("docs/research/doublegraph", remote_path="/root/docs/research/doublegraph")
+    .add_local_dir("archive/datasets_legacy", remote_path="/root/archive/datasets_legacy")
     .add_local_file("skill_a100.md", "/root/skill_a100.md")
     .add_local_file("modal_app.py", "/root/modal_app.py")
 )
