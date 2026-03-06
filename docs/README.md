@@ -4,8 +4,8 @@
 
 | Document | Lines | Purpose |
 |----------|-------|---------|
-| [KERNELFORGE_FINAL_PRD.md](KERNELFORGE_FINAL_PRD.md) | 1,336 | **Single source of truth.** Locked decisions, 4 components, complete task list, repo structure, all links. |
-| [GRPO_DEEP_DIVE.md](GRPO_DEEP_DIVE.md) | 1,713 | GRPO algorithm math, B200 memory budget, TRL GRPOTrainer config, 3-stage training code, stacked mitigations (MARS, Nsight, CPPO, MASPO, grammar). |
+| [KERNELFORGE_FINAL_PRD.md](KERNELFORGE_FINAL_PRD.md) | 1,336+ | **Single source of truth.** Locked hackathon objective, structured-prior thesis, environment scope, task list, repo structure, and source links. |
+| [GRPO_DEEP_DIVE.md](GRPO_DEEP_DIVE.md) | 1,713+ | GRPO algorithm math and the hackathon-fit RL path. Early sections are the active plan; later sections are implementation/reference material, not blanket commitments. |
 | [skills/doublegraph_a100.md](skills/doublegraph_a100.md) | 325 | DoubleGraph engineering reference: 4-layer architecture, A100 kernel deep dives, CachePool, build pipeline, porting guide. |
 
 ## Quick-Reference CLAUDE.md Files

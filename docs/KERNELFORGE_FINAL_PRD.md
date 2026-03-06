@@ -4,41 +4,53 @@
 **Training GPU:** NVIDIA H100 via Modal ($3.95/hr) | **Eval GPU:** NVIDIA A100 80GB via Modal ($2.50/hr) | **Target Kernels:** NVIDIA A100 (`sm_80`)
 **Primary Model:** Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active, 128 experts / 8 active, 256K context)
 **Fallback Model:** Qwen3.5-35B-A3B
-**Last Updated:** March 5, 2026
+**Last Updated:** March 6, 2026
 
 ## Executive Summary
 
-KernelForge for the hackathon is **not** a claim that we will fully reproduce CUDA-Agent.
+KernelForge for the hackathon is **not** a claim that we will reproduce CUDA-Agent's full large-scale training system. CUDA-Agent explicitly frames its contribution as a **large-scale** agentic RL system with scalable data synthesis and a skill-augmented execution environment, while OpenEnv defines a standardized environment contract around `step()`, `reset()`, and `state()`. For this hackathon, our win condition is narrower and clearer: ship a reliable OpenEnv-compatible CUDA kernel environment, demonstrate real A100 compile / correctness / timing feedback, and show that a policy can improve inside that loop under a small compute budget. Sources: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv repo](https://github.com/meta-pytorch/OpenEnv), [CUDA-Agent paper](https://arxiv.org/abs/2602.24286), [CUDA-Agent project page](https://cuda-agent.github.io/).
 
 KernelForge for the hackathon **is**:
-1. a low-cost, OpenEnv-compatible CUDA kernel optimization environment,
+1. a clean, reproducible RL environment for CUDA kernel optimization,
 2. a real compile / correctness / timing feedback loop targeting **A100 kernels**,
-3. a practical training + search stack using **Qwen3-Coder-30B-A3B-Instruct on H100** and **A100 for evaluation**, and
-4. a foundation for later scaling into richer multi-turn RL, larger models, distillation, and future GPU targets.
+3. a structured-prior training stack that starts from expert knowledge instead of cold-start kernel search, and
+4. a credible demonstration that meaningful learning can happen on limited hardware.
 
-The hackathon objective is to prove three things:
+The thesis we are locking for this repo is:
+1. **DoubleGraph is the structured search prior.** It gives us valid A100-oriented kernel patterns and transformation neighborhoods instead of unconstrained free-form exploration. Sources: [doubleGraph repo](https://github.com/double-ai/doubleGraph), [WarpSpeed writeup](https://www.doubleai.com/research/doubleais-warpspeed-surpassing-expert-written-kernels-at-scale).
+2. **`skills.md` is the knowledge prior.** CUDA-Agent's own framing emphasizes a skill-augmented execution environment; we reuse that idea to inject strong CUDA heuristics such as memory coalescing, tiling, warp coordination, and architecture-aware optimization into the model context. Sources: [CUDA-Agent paper](https://arxiv.org/abs/2602.24286), [CUDA-Agent project page](https://cuda-agent.github.io/).
+3. **The curated CUDA-Agent-style dataset is the training prior.** We are not asking RL to discover good kernels from scratch; we are starting from a distribution already enriched with expert kernels, operator tasks, and validated prompt formats. Source: [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K).
+
+The short-term objective is to prove three things:
 - the environment works end to end,
-- the model can improve kernel candidates under real feedback,
+- structured priors reduce wasted exploration enough that the model can improve candidates under real feedback,
 - the system is reusable for larger research later.
 
-The long-term objective remains the same: one-GPU, data-efficient CUDA kernel optimization infrastructure that can later scale to H100 / B200 / B300 and distill learned optimization behavior into smaller or cheaper models.
+The long-term objective remains the same: a one-GPU, data-efficient CUDA kernel optimization platform that can later scale to H100 / B200 / B300 and distill learned optimization behavior into smaller or cheaper models.
 
 ## RL Feasibility (Hackathon-Scoped)
 
 Full CUDA-Agent replication is **not** the hackathon target. The hackathon target is a smaller, credible pilot:
 - A100-targeted kernels with execution-based correctness and timing-based reward
+- structured priors from DoubleGraph, `skills.md`, and curated CUDA-Agent-style tasks
 - H100 for model generation and gradient updates via Modal
 - A100 80GB for all performance measurement via Modal
 - SFT warmup followed by limited-step GRPO pilot
 
-The main bottleneck is evaluation throughput, not model VRAM. Even with a lightweight model, reward collection on remote A100 hardware accumulates latency. With G=2 and short rollout horizons, the compute budget is manageable under $200 total.
+The main bottleneck is evaluation throughput, not model VRAM. Even with a lightweight model, reward collection on remote A100 hardware accumulates latency. The reason this is still credible is that we are **not** exploring the full CUDA kernel space from scratch; we are constraining the search with expert priors before RL begins. With G=2 and short rollout horizons, the compute budget is manageable under $200 total.
 
 The repo should aim to prove:
 1. the environment works (compile → correctness → timing → reward),
 2. the model can improve candidates under real feedback,
 3. the infra is reusable for future scaling (larger models, deeper RL, more tasks).
 
-We are not claiming CUDA-Agent-level generalization or KernelBench reproduction. Those remain future research targets.
+We are not claiming:
+- full CUDA-Agent reproduction,
+- benchmark parity with CUDA-Agent,
+- single-GPU SOTA,
+- guaranteed KernelBench-level generalization.
+
+Those are future targets, not current facts.
 
 ---
 
@@ -82,10 +94,19 @@ Qwen3-Coder-30B-A3B-Instruct is an MoE model with 30.5B total parameters but onl
 ## 1. Strategic Framing
 
 ### Hackathon-first objective
-Build the strongest possible submission for OpenEnv / Cerebral Valley / PyTorch / Unsloth under a real compute budget (**<$200 total**).
+Build the strongest possible submission for OpenEnv / Cerebral Valley / PyTorch / Unsloth under a real compute budget (**<$200 total**) by making the **environment itself** the product: reproducible, judge-runnable, and clearly tied to real reward signals on the target hardware. Source: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/).
+
+### Medium-term research thesis
+Show that **structured priors + graph-constrained search + sample-efficient RL** can produce meaningful CUDA kernel improvement without CUDA-Agent-scale infrastructure. We are borrowing the idea of skill-augmented kernel RL from CUDA-Agent and combining it with DoubleGraph's expert A100 kernel prior, but we are not claiming to reproduce their full training scale. Sources: [CUDA-Agent paper](https://arxiv.org/abs/2602.24286), [doubleGraph repo](https://github.com/double-ai/doubleGraph).
 
 ### Long-term research objective
 Turn this into a reusable research platform for one-GPU CUDA kernel optimization, distillation, and later scaling across H100 / B200 / B300.
+
+### Core proof we are seeking
+- the OpenEnv environment works end to end,
+- the structured priors materially reduce dead-on-arrival exploration,
+- the model can improve kernels under real A100 feedback,
+- the same environment can later be retargeted to new architectures.
 
 ### What we are NOT claiming
 We are not claiming:
@@ -104,6 +125,11 @@ Those are future targets, not current facts.
 
 A practical, budgeted system with five parts:
 
+Three priors make the small-budget RL story plausible:
+- **DoubleGraph prior:** expert A100 kernels and transformation patterns define a structured optimization neighborhood instead of unconstrained code search. Sources: [doubleGraph repo](https://github.com/double-ai/doubleGraph), [WarpSpeed writeup](https://www.doubleai.com/research/doubleais-warpspeed-surpassing-expert-written-kernels-at-scale).
+- **`skills.md` prior:** CUDA rules and architecture heuristics guide generation toward known-good implementation patterns instead of spending rollouts rediscovering basics. Sources: [CUDA-Agent paper](https://arxiv.org/abs/2602.24286), [CUDA-Agent project page](https://cuda-agent.github.io/).
+- **Curated task prior:** CUDA-Agent-style operator tasks and harvested kernels give us a better starting distribution than cold-start RL. Source: [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K).
+
 > **Training vs Eval GPU Split (First Principles):** We train on **H100** ($3.95/hr, 80GB) for model weights, generation, and gradient updates. **All performance reward must execute on A100** (via Modal). Cross-compiling `nvcc -arch=sm_80` on H100 is fine for syntax checking, but measuring runtime/occupancy/memory behavior on Hopper would optimize for the wrong hardware. Training GPU eval is limited to: compile check, symbol scan, `ptxas` static analysis. Any reward involving speedup, correctness verification, or Nsight profiling requires A100 execution.
 
 **Component A — OpenEnv-compatible kernel environment**
@@ -121,13 +147,13 @@ A practical, budgeted system with five parts:
 
 **Component C — Small-budget model training loop**
 - Qwen3-Coder-30B-A3B-Instruct on H100
-- SFT warmup on curated examples (doubleGraph patterns + generated samples)
-- Short GRPO pilot after SFT (G=2, discrete milestone rewards {-1, 1, 2, 3}, limited steps)
+- SFT warmup seeded by DoubleGraph kernels, `skills.md`, and curated CUDA-Agent-style tasks
+- Short GRPO pilot after SFT (G=2, discrete milestone rewards {-1, 1, 2, 3}, limited steps) to validate sample-efficient learning inside the structured search space
 - TRLOO N/(N-1) correction via `TRLOOGRPOTrainer`
 - CUDA-Agent SKILL.md verbatim + doubleGraph pattern paste as prompt context
 - Hybrid eval: H100 local nvcc compile check for fast-fail, Modal A100 for all performance + correctness reward
 
-**Component D — Search-based hedge (SkyDiscover / evolutionary search)**
+**Component D — Optional search hedge (SkyDiscover / evolutionary search)**
 - AdaEvolve + EvoX for kernel evolution via GLM-5 API
 - Independent path to improved kernels even if RL is unstable
 - 80-120 evolutions on seed .cu files
@@ -140,7 +166,7 @@ A practical, budgeted system with five parts:
 - Reproducible workflow
 - Grounded claims (see Claim Discipline section)
 
-**doubleGraph Expert Baselines** (used as training data + prompt context, not runtime dependency)
+**doubleGraph prior** (used as training data + prompt context, not runtime dependency)
 - 192 A100-optimized CUDA kernels for graph algorithms (3.6x avg speedup over cuGraph)
 - Core algorithms: BFS, Louvain, PageRank, WCC, Triangle Count
 - Key A100 (SM80) patterns extracted for SKILL.md prompt context
@@ -166,8 +192,9 @@ After the hackathon, KernelForge should expand into:
 We will try to prove:
 1. the OpenEnv environment is real and usable,
 2. the reward is based on actual compile / correctness / timing behavior,
-3. the model can improve kernel candidates under this loop,
-4. the system can produce demo-worthy results under budget.
+3. the structured priors materially reduce search difficulty,
+4. the model can improve kernel candidates under this loop,
+5. the system can produce demo-worthy results under budget.
 
 ### 3.2 Explicitly out of scope for the hackathon
 - full CUDA-Agent reproduction,
@@ -187,7 +214,7 @@ Before any training:
 - reward must not be hackable.
 
 ### Phase 1 — SFT warmup
-Use curated generated examples, doubleGraph-inspired patterns, existing seed kernels, and any validated kernel-response pairs. Goal: improve compile rate, improve structural kernel quality, reduce dead-on-arrival GRPO steps.
+Use curated generated examples, DoubleGraph-inspired patterns, `skills.md`, existing seed kernels, and validated kernel-response pairs. Goal: improve compile rate, improve structural kernel quality, and ensure GRPO starts inside a constrained optimization neighborhood rather than from raw kernel-space exploration.
 
 ### Phase 2 — Small-budget GRPO pilot
 Run only after SFT. Primary purpose: validate real learning signal, not full-scale benchmark domination.
