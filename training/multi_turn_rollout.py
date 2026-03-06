@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from training.curriculum import format_topology_context
+from training.run_metadata import utc_timestamp_rfc3339
 from training.task_support import (
     build_generation_prompt,
     build_prompt_lookup,
@@ -51,8 +52,10 @@ def _append_rollout_log(record: dict[str, Any]) -> None:
     """Append one rollout event to a JSONL log file."""
     try:
         ROLLOUT_LOG_PATH.parent.mkdir(parents=True, exist_ok=True)
+        payload = dict(record)
+        payload.setdefault("timestamp", utc_timestamp_rfc3339())
         with ROLLOUT_LOG_PATH.open("a", encoding="utf-8") as f:
-            f.write(json.dumps(record) + "\n")
+            f.write(json.dumps(payload) + "\n")
     except OSError:
         pass
 

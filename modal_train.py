@@ -17,8 +17,11 @@ Usage:
 import os
 import modal
 
+os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
 TRAIN_GPU = os.getenv("KERNELFORGE_TRAIN_GPU", "H200")
 APP_NAME = os.getenv("KERNELFORGE_TRAIN_APP", "kernelforge-train")
+EVAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 
 train_image = (
     modal.Image.from_registry(
@@ -27,19 +30,20 @@ train_image = (
     )
     .uv_pip_install(
         "torch>=2.4",
-        "trl[vllm]==0.29.0",
+        "trl==0.29.0",
         "transformers>=4.56.2",
         "datasets>=3.0",
         "accelerate>=1.4.0",
         "peft>=0.14",
+        "Pillow>=10.0",
         "bitsandbytes>=0.45",
         "openenv-core[core]>=0.2.1",
         "numpy>=1.26",
         "modal>=0.70",
-        "flash-attn>=2.7",
     )
     # Unsloth installed separately to bypass stale trl<=0.24.0 cap
     .run_commands("pip install --no-deps unsloth unsloth_zoo 2>/dev/null || true")
+    .run_commands("pip install --no-build-isolation 'flash-attn>=2.7' 2>/dev/null || true")
     .add_local_python_source(
         "training", "openenv_env", "evaluation", "verification",
     )
@@ -76,7 +80,7 @@ def train(stage: int = 1, max_steps: int | None = None, dry_run: bool = False):
     import torch
     print(f"=== KernelForge Training Stage {stage} ===")
     print(f"GPU: {torch.cuda.get_device_name(0)}")
-    print(f"VRAM: {torch.cuda.get_device_properties(0).total_mem / 1e9:.1f} GB")
+    print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     print(f"CUDA: {torch.version.cuda}")
 
     if stage == 0:
@@ -86,6 +90,9 @@ def train(stage: int = 1, max_steps: int | None = None, dry_run: bool = False):
     os.environ["KERNELFORGE_STAGE1_OUTPUT"] = "/checkpoints/stage1"
     os.environ["KERNELFORGE_STAGE2_OUTPUT"] = "/checkpoints/stage2"
     os.environ["KERNELFORGE_STAGE3_OUTPUT"] = "/checkpoints/stage3"
+    os.environ.setdefault("KERNELFORGE_USE_VLLM", "0")
+    os.environ.setdefault("KERNELFORGE_STAGE1_MAX_TURNS", "3")
+    os.environ.setdefault("KERNELFORGE_STAGE3_MAX_TURNS", "3")
 
     if max_steps is not None:
         os.environ[f"KERNELFORGE_STAGE{stage}_MAX_STEPS"] = str(max_steps)
@@ -115,6 +122,8 @@ def _smoke_test() -> dict:
     import torch
 
     results = {}
+    model = None
+    tokenizer = None
 
     # Test 1: Model loading
     print("\n[1/4] Loading model...")
@@ -153,10 +162,12 @@ def _smoke_test() -> dict:
     # Test 3: Generation
     print("\n[3/4] Testing generation...")
     try:
+        if model is None or tokenizer is None:
+            raise RuntimeError("Skipping generation because model loading failed")
         test_prompt = "Write a CUDA vector addition kernel for A100."
         inputs = tokenizer(test_prompt, return_tensors="pt").to("cuda")
         with torch.no_grad():
-            output = model.generate(**inputs, max_new_tokens=64, temperature=0.7)
+            output = model.generate(**inputs, max_new_tokens=64, temperature=0.7, do_sample=True)
         generated = tokenizer.decode(output[0], skip_special_tokens=True)
         results["generation"] = {
             "works": True,
@@ -171,13 +182,20 @@ def _smoke_test() -> dict:
     # Test 4: Eval connectivity
     print("\n[4/4] Testing Modal eval endpoint...")
     try:
-        eval_fn = modal.Function.from_name("kernelforge-a100", "evaluate_ops6k_kernel")
+        eval_fn = modal.Function.from_name(EVAL_APP_NAME, "evaluate_ops6k_kernel")
         test_result = eval_fn.remote({
-            "cuda_code": '__global__ void test(float* x, int n) { int i = threadIdx.x; if (i < n) x[i] *= 2.0f; }',
-            "task_code": 'import torch\nclass Model(torch.nn.Module):\n  def __init__(self): super().__init__()\n  def forward(self, x): return x * 2\ndef get_inputs(): return [torch.randn(256).cuda()]\ndef get_init_inputs(): return []',
+            "cuda_code": '#include <torch/extension.h>\n\ntorch::Tensor run_kernel(torch::Tensor x) {\n    return x * 2;\n}\n\nPYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n    m.def("run_kernel", &run_kernel);\n}',
+            "task_code": 'import torch\nclass Model(torch.nn.Module):\n  def __init__(self): super().__init__()\n  def forward(self, x): return x * 2\ndef get_inputs(): return [torch.randn(256, device="cuda")]\ndef get_init_inputs(): return []',
         })
-        results["eval"] = {"connected": True, "compiles": test_result.get("compiles", False)}
-        print(f"  Eval endpoint: compiles={test_result.get('compiles')}")
+        results["eval"] = {
+            "connected": True,
+            "compiles": test_result.get("compiles", False),
+            "correct": test_result.get("correct", False),
+        }
+        print(
+            f"  Eval endpoint ({EVAL_APP_NAME}): compiles={test_result.get('compiles')} "
+            f"correct={test_result.get('correct')}"
+        )
     except Exception as e:
         results["eval"] = {"connected": False, "error": str(e)[:500]}
         print(f"  FAILED: {e}")
@@ -200,7 +218,7 @@ def _dry_run_stage1() -> dict:
     dataset = load_stage1_dataset()
 
     vram = torch.cuda.memory_allocated() / 1e9
-    total_vram = torch.cuda.get_device_properties(0).total_mem / 1e9
+    total_vram = torch.cuda.get_device_properties(0).total_memory / 1e9
     print(f"Model VRAM: {vram:.1f} / {total_vram:.1f} GB")
     print(f"Dataset: {len(dataset)} examples")
     print(f"Free VRAM: {total_vram - vram:.1f} GB (for KV cache + optimizer)")

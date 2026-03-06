@@ -16,6 +16,7 @@ if __package__ in {None, ""}:
 
 from training.dataset_loader import Dataset, MiniDataset, load_training_dataset
 from training.multi_turn_rollout import extract_cuda_code
+from training.run_metadata import utc_timestamp_rfc3339
 from training.task_support import (
     build_generation_prompt,
     evaluate_code_on_modal,
@@ -94,6 +95,7 @@ class TrajectoryCollector:
 
             return {
                 "id": trajectory_id,
+                "trajectory_id": trajectory_id,
                 "prompt": prompt,
                 "model_output": model_output,
                 "reward": float(result["reward"]),
@@ -104,7 +106,7 @@ class TrajectoryCollector:
                 "error": result.get("error", ""),
                 "evaluation_backend": task.get("evaluation_backend"),
                 "task_metadata": task,
-                "timestamp": trajectory_id,
+                "timestamp": utc_timestamp_rfc3339(),
             }
         except Exception as exc:
             print(f"Error in trajectory {trajectory_id}: {exc}")
@@ -201,6 +203,8 @@ extern "C" __global__ void wcc_kernel(const int* row_ptr, const int* col_idx, in
                 "speedup_vs_orig": trajectory["speedup_vs_orig"],
                 "speedup_vs_dg": trajectory["speedup_vs_dg"],
                 "evaluation_backend": trajectory["evaluation_backend"],
+                "trajectory_id": trajectory.get("trajectory_id", trajectory["id"]),
+                "timestamp": trajectory["timestamp"],
             }
             rft_examples.append(example)
 

@@ -1,10 +1,11 @@
 # KernelForge: Hackathon PRD
 ## Single Source of Truth for the OpenEnv / Cerebral Valley / PyTorch / Unsloth Hackathon
 **Hackathon:** OpenEnv Hackathon SF — March 7–8, 2026 (SHACK15, San Francisco)
-**Training GPU:** NVIDIA H100 via Modal ($3.95/hr) | **Eval GPU:** NVIDIA A100 80GB via Modal ($2.50/hr) | **Target Kernels:** NVIDIA A100 (`sm_80`)
+**Training GPU:** NVIDIA H200 via Modal ($4.54/hr, current `modal_train.py` default) with H100 as a fallback path | **Eval GPU:** NVIDIA A100 80GB via Modal ($2.50/hr) | **Target Kernels:** NVIDIA A100 (`sm_80`)
 **Primary Model:** Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active, 128 experts / 8 active, 256K context)
 **Fallback Model:** Qwen3.5-35B-A3B
 **Last Updated:** March 6, 2026
+**Live infra references:** [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200), [Modal GPU guide](https://modal.com/docs/guide/gpu)
 
 ## Executive Summary
 
@@ -33,11 +34,12 @@ The long-term objective remains the same: a one-GPU, data-efficient CUDA kernel 
 Full CUDA-Agent replication is **not** the hackathon target. The hackathon target is a smaller, credible pilot:
 - A100-targeted kernels with execution-based correctness and timing-based reward
 - structured priors from DoubleGraph, `skills.md`, and curated CUDA-Agent-style tasks
-- H100 for model generation and gradient updates via Modal
+- H200 for model generation and gradient updates via Modal
 - A100 80GB for all performance measurement via Modal
-- SFT warmup followed by limited-step GRPO pilot
+- SFT warmup followed by a limited-step GRPO pilot on the live-evaluable consolidated subset
+- **no `vLLM` in the hackathon runtime path**; use the standard TRL / Transformers generation path on a single H200 for the fastest reliable bring-up, and reserve `vLLM` for later scale-up once separate inference capacity or tuned colocation is justified. Sources: [TRL GRPO docs](https://huggingface.co/docs/trl/grpo_trainer), [TRL vLLM integration](https://huggingface.co/docs/trl/en/vllm_integration)
 
-The main bottleneck is evaluation throughput, not model VRAM. Even with a lightweight model, reward collection on remote A100 hardware accumulates latency. The reason this is still credible is that we are **not** exploring the full CUDA kernel space from scratch; we are constraining the search with expert priors before RL begins. With G=2 and short rollout horizons, the compute budget is manageable under $200 total.
+The main bottleneck is evaluation throughput, not model VRAM. Even with a lightweight model, reward collection on remote A100 hardware accumulates latency. The reason this is still credible is that we are **not** exploring the full CUDA kernel space from scratch; we are constraining the search with expert priors before RL begins. With G=2, short multi-turn rollouts, and a supported live-evaluable subset, the compute budget is still manageable under $200 total.
 
 The repo should aim to prove:
 1. the environment works (compile → correctness → timing → reward),
@@ -59,12 +61,13 @@ Those are future targets, not current facts.
 | Decision | Choice | Why |
 |----------|--------|-----|
 | Target kernels | **A100 `sm_80`** | The optimization target is A100 behavior, so performance reward must be measured on A100 rather than on a different architecture. |
-| Training GPU | **H100** ($3.95/hr via Modal) | For the hackathon, H100 is the practical high-end training choice under budget. Qwen3-Coder-30B-A3B-Instruct fits comfortably on 80GB. Cheaper than B200 ($6.25/hr). |
-| Eval GPU | **A100 80GB** via Modal ($2.50/hr) | **Hard requirement:** any reward involving speedup/runtime MUST execute on A100. H100-only eval is limited to: compile check, symbol scan, static analysis. |
+| Training GPU | **H200** ($4.54/hr via Modal) | For the hackathon, H200 is the active training default in code and provides enough headroom for Qwen3-Coder-30B-A3B-Instruct plus LoRA and rollout overhead on one GPU. Sources: [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200), [Modal GPU guide](https://modal.com/docs/guide/gpu). |
+| Eval GPU | **A100 80GB** via Modal ($2.50/hr) | **Hard requirement:** any reward involving speedup/runtime MUST execute on A100. H200-only eval is limited to bring-up, compilation, and local syntax checks. Sources: [Modal pricing](https://modal.com/pricing), [Modal GPU guide](https://modal.com/docs/guide/gpu). |
 | Primary model | **Qwen3-Coder-30B-A3B-Instruct** | Coding-agent model with 30.5B total / 3.3B active params, 48 layers, 128 experts / 8 active, 256K native context. Strong coding baseline without 80B-scale deployment burden. |
 | Fallback model | **Qwen3.5-35B-A3B** | If primary model underperforms or has compatibility issues. |
 | SkyDiscover LLM | GLM-5 via API ($1/M input) | Frontier 744B model for kernel evolution. ~$2-8/run. |
-| Hackathon training path | **SFT warmup first, then small-budget GRPO pilot** | Safest way to get a working demo under budget and time pressure. |
+| Hackathon training path | **SFT warmup first, then small-budget GRPO pilot** | Safest way to get a working demo under budget and time pressure. Use the consolidated supported subset first, not the full raw corpus. |
+| Candidate runtime | **Multi-turn, no `vLLM`** | The hackathon runtime keeps the agentic multi-turn loop because that is the core CUDA-Agent-style value, while still deferring `vLLM` to avoid extra bring-up complexity on a single H200. Use short multi-turn defaults first, and only fall back to single-turn if evaluation latency blows the budget. Sources: [CUDA-Agent paper](https://arxiv.org/html/2602.24286v1), [CUDA-Agent project page](https://cuda-agent.github.io/), [TRL GRPO docs](https://huggingface.co/docs/trl/grpo_trainer). |
 | Parallel hedge | **SkyDiscover / evolutionary search** | Search gives a second route to demo results even if RL underperforms. |
 | RL library | **TRL + OpenEnv** | TRL officially supports OpenEnv integration. TRLOO N/(N-1) correction applied via `TRLOOGRPOTrainer`. |
 | Environment spec | OpenEnv (step/reset/state) | Hackathon framework requirement. |
@@ -77,11 +80,11 @@ Qwen3-Coder-30B-A3B-Instruct is an MoE model with 30.5B total parameters but onl
 
 | GPU | VRAM | Model (FP8) | Free for Training | $/hr (Modal) | Verdict |
 |-----|------|-------------|-------------------|-------------|---------|
-| **H100** | 80 GB HBM3 | ~16-18 GB | **~60 GB** | **$3.95** | **Primary — ample headroom, best $/hr for hackathon** |
+| **H200** | 141 GB HBM3e | ~16-18 GB | **~123 GB** | **$4.54** | **Primary — active Modal training default with ample headroom for single-GPU hackathon bring-up** |
 | B200 | 192 GB HBM3e | ~16-18 GB | ~174 GB | $6.25 | Overkill for 30B model; reserved for future 80B scale-up |
 | A100 80GB | 80 GB HBM2e | ~16-18 GB | ~60 GB | $2.50 | **Eval only** — target architecture for kernel performance |
 
-**H100 training overhead budget (~60GB free):**
+**H200 training overhead budget (~123GB free):**
 
 | Component | Size | Notes |
 |-----------|------|-------|
@@ -89,7 +92,7 @@ Qwen3-Coder-30B-A3B-Instruct is an MoE model with 30.5B total parameters but onl
 | Optimizer (paged_adamw_8bit) | ~1.5 GB | 8-bit Adam states for LoRA params only |
 | KV cache (8K context, G=2) | ~4-6 GB | Conservative context for hackathon pilot |
 | Activations + gradient checkpointing | ~8-12 GB | With gradient checkpointing enabled |
-| **Total** | **~14-20 GB** | **Fits in 60GB with ~40-46GB margin** |
+| **Total** | **~14-20 GB** | **Fits easily in H200 headroom with large margin for single-turn rollout and LoRA training** |
 
 ## 1. Strategic Framing
 
@@ -146,12 +149,12 @@ Three priors make the small-budget RL story plausible:
 - Source: https://github.com/BytedTsinghua-SIA/CUDA-Agent
 
 **Component C — Small-budget model training loop**
-- Qwen3-Coder-30B-A3B-Instruct on H100
+- Qwen3-Coder-30B-A3B-Instruct on H200
 - SFT warmup seeded by DoubleGraph kernels, `skills.md`, and curated CUDA-Agent-style tasks
 - Short GRPO pilot after SFT (G=2, discrete milestone rewards {-1, 1, 2, 3}, limited steps) to validate sample-efficient learning inside the structured search space
 - TRLOO N/(N-1) correction via `TRLOOGRPOTrainer`
 - CUDA-Agent SKILL.md verbatim + doubleGraph pattern paste as prompt context
-- Hybrid eval: H100 local nvcc compile check for fast-fail, Modal A100 for all performance + correctness reward
+- Hybrid eval: H200 local nvcc compile check for fast-fail, Modal A100 for all performance + correctness reward
 
 **Component D — Optional search hedge (SkyDiscover / evolutionary search)**
 - AdaEvolve + EvoX for kernel evolution via GLM-5 API
@@ -251,13 +254,16 @@ Do not present these bonuses as core unless they are wired end to end.
 - `Qwen3-Coder-30B-A3B-Instruct`
 
 ### Hardware
-- H100 for generation + updates ($3.95/hr)
+- H200 for generation + updates ($4.54/hr)
 - A100 80GB for evaluation ($2.50/hr)
 
 ### RL posture
 - SFT warmup first
 - GRPO pilot second (only if SFT shows decent compile rate)
-- shallow rollout horizon — avoid pretending deep multi-turn is mandatory on day one
+- multi-turn agentic rollout default for the hackathon path
+- single-turn is an emergency de-scope, not the primary story
+- no `vLLM` in the hackathon runtime path
+- use the consolidated CUDA-Agent + DoubleGraph corpus, but only the currently supported live-evaluable subset for real reward-bearing runs
 
 ### Candidate generation
 - `G=2`
@@ -281,11 +287,11 @@ The plan must stay under **$200** total.
 
 | Budget bucket | Target |
 |---------------|--------|
-| H100 SFT + GRPO pilot | $60–100 |
+| H200 SFT + GRPO pilot | $70–120 |
 | A100 evaluation | $40–70 |
 | Buffer / retries / smoke tests | $20–40 |
 
-This is feasible with current Modal pricing: H100 at $0.001097/sec ($3.95/hr), A100 80GB at $0.000694/sec ($2.50/hr).
+This is feasible with current Modal pricing: H200 at $4.54/hr and A100 80GB at $2.50/hr. Sources: [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200).
 
 Do not lock the PRD to fake exact step counts unless they are explicitly labeled as estimates.
 
@@ -392,21 +398,27 @@ This section is the **live status tracker** for what is actually implemented in 
 
 | Area | Status | Notes |
 |------|--------|-------|
+| Authoritative evaluation wrappers | **Done** | `evaluation/sandbox.py`, `evaluation/compiler.py`, `evaluation/verifier.py`, and `evaluation/profiler.py` now exist as the repo’s importable evaluation primitives, matching the intended split of sandbox / compile / verify / profile responsibilities. |
+| Run metadata timestamps | **Done** | `training/run_metadata.py` now emits RFC 3339 / ISO 8601 UTC timestamps, and rollout / RFT paths use those timestamps for machine-readable run metadata. Standard reference: [RFC 3339](https://www.rfc-editor.org/info/rfc3339). |
 | OpenEnv-compatible environment contract | **Partial** | The repo has `openenv_env/kernel_forge_env.py` with `step()/reset()/state()` wiring aligned with the OpenEnv interface, but the PRD-level `openenv_wrapper/` package is not the authoritative implementation path yet. OpenEnv interface reference: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv repo](https://github.com/meta-pytorch/OpenEnv). |
 | Reward loop (compile → correctness → timing → reward) | **Partial** | The code routes tasks to Modal-backed evaluators and computes canonical rewards, but end-to-end correctness/timing readiness still depends on live Modal auth plus remote A100 execution. |
 | DoubleGraph prior integration | **Done for prompt/data priors** | The repo already ships a DoubleGraph manifest, topology-aware curriculum tasks, dynamic `skills.md` augmentation, and Stage 2 SFT priors derived from DoubleGraph. Runtime doubleGraph wheel install remains optional. Source: [doubleGraph repo](https://github.com/double-ai/doubleGraph). |
 | `skills.md` integration | **Done** | Skill context is injected into rollout generation and Stage 2 trajectory collection; dynamic Hopper/H200 skill generation is now supported. |
 | Curated dataset integration | **Done** | `datasets/build_combined_dataset.py` merges DoubleGraph manifest rows with CUDA-Agent-style operator tasks; `training/dataset_loader.py` routes Stage 1/2/3 data appropriately. Source: [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K). |
-| Stage 1 warmup entrypoint | **Done** | Startup/import issues were fixed and fallback dataset handling is now robust. |
+| Stage 1 warmup entrypoint | **Done, but needs real run** | Startup/import issues were fixed, fallback dataset handling is robust, and the trainer now uses the custom rollout path with TRL/OpenEnv-compatible generation flow. TRL OpenEnv reference: [TRL OpenEnv docs](https://huggingface.co/docs/trl/main/en/openenv). |
 | Stage 2 RFT / SFT | **Done, but needs real run** | Stage 2 now merges filtered trajectories with DoubleGraph SFT priors before training. |
-| Stage 3 GRPO pilot | **Done, but needs real run** | Startup/import issues were fixed; curriculum dataset creation works with both HF-style and fallback datasets. |
-| H200 training support | **Done in code** | The current codebase now supports H200 in the GPU registry and dynamic skill generation, matching Hopper/H200 training intent. H200 product reference: [NVIDIA H200](https://www.nvidia.com/en-us/data-center/h200/). |
-| Modal training image / remote asset wiring | **Done** | The training image now includes `openenv-core` and ships the dataset / manifest assets needed by the loader on remote runs. |
-| Preflight / fail-fast validation | **Done** | `training/grpo_train.py --preflight-only` now validates dependencies and required assets before launch. |
-| Modal authentication | **Blocked externally** | Preflight currently passes, but actual training remains blocked until Modal credentials are configured. |
+| Stage 3 GRPO pilot | **Done, but needs real run** | Startup/import issues were fixed; curriculum dataset creation works with both HF-style and fallback datasets. For the hackathon path, `vLLM` is intentionally deferred and the runtime is streamlined around the standard TRL generation path on a single H200. Sources: [TRL GRPO docs](https://huggingface.co/docs/trl/grpo_trainer), [TRL vLLM integration](https://huggingface.co/docs/trl/en/vllm_integration). |
+| H200 training launcher | **Done in code** | `modal_train.py` now defaults to `KERNELFORGE_TRAIN_GPU=H200`, which matches Modal’s supported `gpu="H200"` configuration and current H200 pricing / availability. Sources: [Modal GPU guide](https://modal.com/docs/guide/gpu), [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200). |
+| Modal eval app selection | **Done in code** | Both the smoke test path and `KernelForgeEnv` now resolve the eval app through `KERNELFORGE_MODAL_APP` instead of a hardcoded name, reducing deployment mismatch risk. |
+| Modal training image / remote asset wiring | **Done** | The training image includes `openenv-core` and ships the dataset / manifest assets needed by the loader on remote runs. |
+| Smoke-test validity | **Done in code, needs remote verification** | The smoke test now uses a minimal PyTorch extension-style payload for `evaluate_ops6k_kernel`, and generation is skipped cleanly if model loading fails. |
+| Preflight / fail-fast validation | **Done** | `training/grpo_train.py --preflight-only` validates dependencies and required assets before launch, and the local preflight now passes. |
+| Modal authentication + deployed eval app | **Blocked externally** | Real smoke / GRPO execution still require Modal credentials plus deployment of `modal_app.py` before `modal_train.py --stage 0`, because the training smoke path resolves `modal.Function.from_name(...)`. Modal behavior reference: [modal deploy docs](https://modal.com/docs/reference/cli/deploy), [modal run docs](https://modal.com/docs/reference/cli/run), [Apps guide](https://modal.com/docs/guide/apps). |
 
 ### 8.5.2 What is done right now
 
+- **[done]** `evaluation/sandbox.py`, `evaluation/compiler.py`, `evaluation/verifier.py`, and `evaluation/profiler.py` now exist as authoritative evaluation modules.
+- **[done]** `training/run_metadata.py` provides a shared RFC 3339 UTC timestamp utility, and rollout / RFT metadata now use it consistently. Standard reference: [RFC 3339](https://www.rfc-editor.org/info/rfc3339).
 - **[done]** `training/stage1_warmup.py` is runnable in principle and no longer fails on invalid `__future__` import ordering.
 - **[done]** `training/stage3_grpo.py` is runnable in principle and no longer fails on invalid `__future__` import ordering.
 - **[done]** `openenv_env/gpu_registry.py` includes H200, so Hopper-class training targets are explicit in code.
@@ -414,13 +426,16 @@ This section is the **live status tracker** for what is actually implemented in 
 - **[done]** `training/rft_filter.py` now uses the same `skills.md` + topology-aware prompt construction style as the RL rollout path.
 - **[done]** `training/stage2_rft.py` now merges DoubleGraph SFT prior rows with filtered trajectories instead of training only on collected rollouts.
 - **[done]** `modal_train.py` now ships dataset assets and the DoubleGraph manifest into the Modal training image.
+- **[done]** `modal_train.py` now resolves the eval app via `KERNELFORGE_MODAL_APP` and its smoke test uses a valid extension-style payload for `evaluate_ops6k_kernel`.
+- **[done]** `openenv_env/kernel_forge_env.py` now resolves the eval app via `KERNELFORGE_MODAL_APP` instead of a hardcoded app name.
+- **[done]** `pyproject.toml` now includes `evaluation*` in package discovery so editable / built installs match the source tree.
 - **[done]** `training/grpo_train.py` now performs asset-aware preflight checks before launch.
 
 ### 8.5.3 What is partially done
 
 - **[partial]** The environment is coded, but the real judge story depends on a full, reproducible remote execution path and a clean demo wrapper.
 - **[partial]** The reward loop is implemented in code paths, but still requires successful live Modal A100 evals to be considered benchmark-ready.
-- **[partial]** The combined dataset path works, but current preflight output shows a relatively small supported live-eval subset in the local fallback case, so real task coverage still depends on the full upstream dataset and remote evaluator availability.
+- **[partial]** The combined dataset path works, but the currently validated pilot subset is still narrow: local validation produced 19 live-evaluable rows for Stage 1 / Stage 3 (15 CUDA-Agent-derived operator tasks plus 4 DoubleGraph/A100 WCC-style rows), so real task coverage still depends on the full upstream dataset and remote evaluator availability.
 - **[partial]** The repo contains topology-aware graph tasks and DoubleGraph priors, but only a subset currently routes to live evaluation backends today.
 
 ### 8.5.4 What is not done yet
@@ -447,9 +462,10 @@ This section is the **live status tracker** for what is actually implemented in 
 - **Owner:** Infra
 - **Subtasks:**
   - Configure Modal credentials locally.
+  - Deploy `modal_app.py` so `kernelforge-a100` exists remotely before the training smoke path calls `modal.Function.from_name(...)`.
   - Verify `modal run modal_train.py --stage 0` completes successfully.
   - Verify the remote training image can see `/root/datasets` and `/root/docs/research/doublegraph`.
-- **Done when:** Stage 0 smoke test passes on remote GPU.
+- **Done when:** The eval app is deployed and Stage 0 smoke test passes on remote GPU.
 
 #### Task B: Validate Stage 1 warmup on remote GPU
 - **Status:** Not done
@@ -487,6 +503,45 @@ This section is the **live status tracker** for what is actually implemented in 
   - Measure reward variance / improvement signal during Stage 3.
   - Record eval throughput and cost on the real remote setup.
 - **Done when:** We can decide truthfully whether to ship `environment + SFT + search` or `environment + SFT + GRPO`.
+
+### 8.5.7 Exact Modal execution order (current repo)
+
+The current shortest-path run order is:
+
+1. **Authenticate Modal locally**
+   ```bash
+   uv run modal token new
+   ```
+2. **Deploy the eval app first**
+   ```bash
+   KERNELFORGE_MODAL_APP=kernelforge-a100 uv run modal deploy modal_app.py
+   ```
+3. **Run the training smoke test on H200**
+   ```bash
+   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 uv run modal run modal_train.py --stage 0
+   ```
+4. **Run Stage 1 dry-run on H200**
+   ```bash
+   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE1_MAX_TURNS=3 uv run modal run modal_train.py --stage 1 --dry-run
+   ```
+5. **Run a tiny Stage 1 warmup on the streamlined hackathon path**
+   ```bash
+   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE1_MAX_TURNS=3 uv run modal run modal_train.py --stage 1 --max-steps 5
+   ```
+6. **Run Stage 2 after Stage 1 checkpoint exists**
+   ```bash
+   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 uv run modal run modal_train.py --stage 2
+   ```
+7. **Run a tiny Stage 3 GRPO pilot**
+   ```bash
+   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE3_MAX_TURNS=3 uv run modal run modal_train.py --stage 3 --max-steps 5
+   ```
+
+Why this order matters:
+- `modal deploy` creates a deployed app, while `modal run` creates an ephemeral app. Sources: [modal deploy docs](https://modal.com/docs/reference/cli/deploy), [modal run docs](https://modal.com/docs/reference/cli/run), [Apps guide](https://modal.com/docs/guide/apps).
+- The current smoke / environment paths call `modal.Function.from_name(EVAL_APP_NAME, ...)`, so the eval app must exist remotely before the training smoke test can pass.
+- Modal explicitly supports `gpu="H200"` and `gpu="A100"`, and lists current H200 / A100 pricing on its pricing page. Sources: [Modal GPU guide](https://modal.com/docs/guide/gpu), [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200).
+- TRL’s OpenEnv integration supports custom `rollout_func` flows for GRPO, which is the pattern used by this repo. Source: [TRL OpenEnv docs](https://huggingface.co/docs/trl/main/en/openenv).
 
 ---
 
@@ -591,7 +646,7 @@ ls skydiscover/  # SkyDiscover repo
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu124
 pip install --no-deps unsloth unsloth_zoo
-pip install "trl[vllm]==0.29.0"  # Pin to version validated by Gate G-0.6 — do NOT upgrade without re-running gate
+pip install "trl==0.29.0"  # Hackathon path does not use vLLM; keep the base TRL pin for the streamlined single-H200 runtime
 pip install transformers>=4.56.2 datasets accelerate peft
 pip install openenv-core>=0.2.1
 pip install cupy-cuda12x
@@ -1589,13 +1644,13 @@ bash skydiscover_integration/run_evolution.sh
 - The launch paths exist, but the real blocker remains Modal auth plus successful short remote validation runs.
 
 ```bash
-# Recommended order:
-modal run modal_train.py --stage 1 --max-steps 10
-modal run modal_train.py --stage 2
-modal run modal_train.py --stage 3 --max-steps 10
+# Recommended order (hackathon runtime path = single H200, no vLLM, short multi-turn agentic loop):
+KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE1_MAX_TURNS=3 modal run modal_train.py --stage 1 --max-steps 10
+KERNELFORGE_USE_VLLM=0 modal run modal_train.py --stage 2
+KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE3_MAX_TURNS=3 modal run modal_train.py --stage 3 --max-steps 10
 
 # If running locally with the orchestrator after preflight:
-uv run python -m training.grpo_train --stage pipeline
+KERNELFORGE_USE_VLLM=0 uv run python -m training.grpo_train --stage pipeline
 ```
 
 #### Task 28: doubleGraph Comparison (if installed)

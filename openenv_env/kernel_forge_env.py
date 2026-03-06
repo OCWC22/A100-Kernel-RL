@@ -61,9 +61,9 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
     Context: 128K tokens
     """
 
-    def __init__(self, modal_function_name="kernelforge-a100"):
+    def __init__(self, modal_function_name: str | None = None):
         super().__init__()
-        self.modal_fn = modal_function_name
+        self.modal_fn = modal_function_name or os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
         self.target_gpu = os.getenv("KERNELFORGE_TARGET_GPU", "a100").lower()
         self.gpu_spec = get_gpu_spec(self.target_gpu)
         self.history = []               # Time-travel snapshots (DoubleAI-inspired)

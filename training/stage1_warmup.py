@@ -36,7 +36,8 @@ TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stage1")
 IS_LINUX = sys.platform.startswith("linux")
-USE_VLLM = os.getenv("KERNELFORGE_USE_VLLM", "1") == "1" and IS_LINUX
+USE_VLLM = os.getenv("KERNELFORGE_USE_VLLM", "0") == "1" and IS_LINUX
+VLLM_GPU_MEMORY_UTILIZATION = float(os.getenv("KERNELFORGE_VLLM_GPU_MEMORY_UTILIZATION", "0.6"))
 OPTIMIZER = "paged_adamw_8bit" if IS_LINUX else "adamw_torch"
 USE_BF16 = IS_LINUX
 
@@ -124,7 +125,6 @@ def main():
         learning_rate=2e-6,
         temperature=1.0,         # High exploration
         num_generations=2,
-        max_prompt_length=4096,
         max_completion_length=4096,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
@@ -139,6 +139,7 @@ def main():
         repetition_penalty=1.05,
         use_vllm=USE_VLLM,
         vllm_mode="colocate" if USE_VLLM else "server",
+        vllm_gpu_memory_utilization=VLLM_GPU_MEMORY_UTILIZATION,
     )
 
     trainer = TRLOOGRPOTrainer(

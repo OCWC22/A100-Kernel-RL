@@ -110,6 +110,7 @@ where = ["."]
 include = [
     "openenv_env*",
     "training*",
+    "evaluation*",
     "verification*",
     "datasets*",
     "demo*",
