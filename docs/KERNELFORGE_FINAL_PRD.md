@@ -508,6 +508,8 @@ This section is the **live status tracker** for what is actually implemented in 
 
 The current shortest-path run order is:
 
+> Pre-run reliability note: `modal_train.py` now treats Unsloth installation as fail-fast during image build so dependency issues surface before remote training starts, while `flash-attn` remains best-effort optional. This matches the current single-H200 no-vLLM bring-up strategy where avoiding masked dependency failures is critical before running expensive remote jobs.
+
 1. **Authenticate Modal locally**
    ```bash
    uv run modal token new
@@ -524,7 +526,7 @@ The current shortest-path run order is:
    ```bash
    KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE1_MAX_TURNS=3 uv run modal run modal_train.py --stage 1 --dry-run
    ```
-5. **Run a tiny Stage 1 warmup on the streamlined hackathon path**
+5. **Run a tiny Stage 1 warmup on the streamlined hackathon path (after smoke + dry-run pass)**
    ```bash
    KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE1_MAX_TURNS=3 uv run modal run modal_train.py --stage 1 --max-steps 5
    ```

@@ -34,15 +34,16 @@ train_image = (
         "transformers>=4.56.2",
         "datasets>=3.0",
         "accelerate>=1.4.0",
-        "peft>=0.14",
+        "peft>=0.17.0",
         "Pillow>=10.0",
         "bitsandbytes>=0.45",
         "openenv-core[core]>=0.2.1",
         "numpy>=1.26",
         "modal>=0.70",
     )
-    # Unsloth installed separately to bypass stale trl<=0.24.0 cap
-    .run_commands("pip install --no-deps unsloth unsloth_zoo 2>/dev/null || true")
+    # Unsloth installed separately to bypass stale trl<=0.24.0 cap.
+    # Keep this fail-fast so missing core deps are caught at image build time.
+    .run_commands("pip install --no-deps unsloth unsloth_zoo")
     .run_commands("pip install --no-build-isolation 'flash-attn>=2.7' 2>/dev/null || true")
     .add_local_python_source(
         "training", "openenv_env", "evaluation", "verification",
@@ -84,7 +85,11 @@ def train(stage: int = 1, max_steps: int | None = None, dry_run: bool = False):
     print(f"CUDA: {torch.version.cuda}")
 
     if stage == 0:
-        return _smoke_test()
+        smoke = _smoke_test()
+        strict_smoke = os.getenv("KERNELFORGE_SMOKE_STRICT", "1") == "1"
+        if strict_smoke and not smoke.get("smoke_ok", False):
+            raise RuntimeError("Stage 0 smoke test failed. Fix failing checks before Stage 1.")
+        return smoke
 
     # Set output dirs to Modal volumes
     os.environ["KERNELFORGE_STAGE1_OUTPUT"] = "/checkpoints/stage1"
@@ -93,28 +98,36 @@ def train(stage: int = 1, max_steps: int | None = None, dry_run: bool = False):
     os.environ.setdefault("KERNELFORGE_USE_VLLM", "0")
     os.environ.setdefault("KERNELFORGE_STAGE1_MAX_TURNS", "3")
     os.environ.setdefault("KERNELFORGE_STAGE3_MAX_TURNS", "3")
+    os.environ.setdefault("CUDA_AGENT_STAGE1_SAMPLES", "100")
+    os.environ.setdefault("KERNELFORGE_STAGE3_OPS6K_MAX", "100")
 
     if max_steps is not None:
         os.environ[f"KERNELFORGE_STAGE{stage}_MAX_STEPS"] = str(max_steps)
 
-    if stage == 1:
-        from training.stage1_warmup import main as stage1_main
-        if dry_run:
-            return _dry_run_stage1()
-        stage1_main()
-    elif stage == 2:
-        from training.stage2_rft import main as stage2_main
-        stage2_main()
-    elif stage == 3:
-        from training.stage3_grpo import main as stage3_main
-        stage3_main()
-    else:
-        print(f"Unknown stage: {stage}")
-        return {"error": f"Unknown stage {stage}"}
+    try:
+        if stage == 1:
+            from training.stage1_warmup import main as stage1_main
+            if dry_run:
+                return _dry_run_stage1()
+            stage1_main()
+        elif stage == 2:
+            from training.stage2_rft import main as stage2_main
+            stage2_main()
+        elif stage == 3:
+            from training.stage3_grpo import main as stage3_main
+            stage3_main()
+        else:
+            print(f"Unknown stage: {stage}")
+            return {"error": f"Unknown stage {stage}"}
 
-    # Commit volumes so checkpoints persist
-    checkpoints_vol.commit()
-    return {"status": "complete", "stage": stage}
+        return {"status": "complete", "stage": stage}
+    finally:
+        # Persist artifacts even if a stage fails mid-run.
+        for vol, label in ((checkpoints_vol, "checkpoints"), (datasets_vol, "datasets")):
+            try:
+                vol.commit()
+            except Exception as exc:
+                print(f"WARNING: failed to commit {label} volume: {exc}")
 
 
 def _smoke_test() -> dict:
@@ -201,9 +214,21 @@ def _smoke_test() -> dict:
         print(f"  FAILED: {e}")
 
     print("\n=== Smoke Test Complete ===")
-    for key, val in results.items():
-        status = "PASS" if val.get("loaded") or val.get("works") or val.get("connected") else "FAIL"
-        print(f"  {key}: {status}")
+    smoke_status = {
+        "model": bool(results.get("model", {}).get("loaded")),
+        "dataset": bool(results.get("dataset", {}).get("loaded")),
+        "generation": bool(results.get("generation", {}).get("works")),
+        "eval": bool(
+            results.get("eval", {}).get("connected")
+            and results.get("eval", {}).get("compiles")
+            and results.get("eval", {}).get("correct")
+        ),
+    }
+    for key, passed in smoke_status.items():
+        print(f"  {key}: {'PASS' if passed else 'FAIL'}")
+
+    results["smoke_ok"] = all(smoke_status.values())
+    print(f"  overall: {'PASS' if results['smoke_ok'] else 'FAIL'}")
 
     return results
 

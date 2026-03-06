@@ -6,16 +6,16 @@ GPU split: H200 handles model weights + generation + gradient updates.
            You cannot optimize A100 performance by measuring on H200.
 
 Multi-turn agentic training via TRL's rollout_func:
-  - 3-5 turns per episode
+  - 3 turns per episode (hackathon default)
   - CurriculumManager for progressive difficulty
   - Temperature 0.7 for exploitation
   - LR 3e-6 (per GRPO-15.1 hackathon config)
   - 50 max_steps (hackathon pilot — only if Gate G-0.8 passes)
   - G=2 (reduced from 4 — fewer zero-gradient steps)
-  - H100: local nvcc compile check (fast-fail syntax errors)
+  - H200: local nvcc compile check (fast-fail syntax errors)
   - A100 (Modal): execution correctness + speedup timing for reward
   - Discrete reward {-1, 1, 2, 3} per CUDA Agent ablation
-  - vLLM colocate mode for generation
+  - vLLM disabled by default for hackathon bring-up (`KERNELFORGE_USE_VLLM=0`)
 
 GRPO is experimental. SkyDiscover + SFT are primary hedges.
 See docs/GRPO_DEEP_DIVE.md GRPO-15.1 for hackathon configuration.

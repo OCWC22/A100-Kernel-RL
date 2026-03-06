@@ -7,7 +7,7 @@ Multi-turn agentic training via TRL's rollout_func:
   - LR 2e-6 to avoid catastrophic forgetting
   - beta=0.0 (no KL penalty — let model explore freely)
   - G=2 generations, 100 max_steps (hackathon config)
-  - vLLM colocate mode for generation
+  - vLLM disabled by default for hackathon bring-up (`KERNELFORGE_USE_VLLM=0`)
 
 Dataset: CUDA-Agent-Ops-6K easy operators (single-op subset).
 """
