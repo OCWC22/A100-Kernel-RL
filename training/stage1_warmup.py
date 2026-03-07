@@ -44,6 +44,7 @@ USE_BF16 = IS_LINUX
 # Multi-turn configuration
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE1_MAX_TURNS", "3"))
 MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE1_MAX_STEPS", "100"))
+MAX_COMPLETION_LENGTH = int(os.getenv("KERNELFORGE_STAGE1_MAX_COMPLETION_LENGTH", "1024"))
 
 
 # --- Dataset loading ---
@@ -110,6 +111,7 @@ def main():
     print(f"=== Stage 1: Multi-Turn GRPO Warm-up for {TARGET_GPU} ({TARGET_ARCH}) ===")
     print(f"  Max turns per episode: {MAX_TURNS}")
     print(f"  Max training steps: {MAX_STEPS}")
+    print(f"  Max completion length: {MAX_COMPLETION_LENGTH}")
 
     model, tokenizer = load_model_and_tokenizer()
     dataset = load_stage1_dataset()
@@ -125,7 +127,7 @@ def main():
         learning_rate=2e-6,
         temperature=1.0,         # High exploration
         num_generations=2,
-        max_completion_length=4096,
+        max_completion_length=MAX_COMPLETION_LENGTH,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         max_steps=MAX_STEPS,

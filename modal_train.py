@@ -30,6 +30,7 @@ train_image = (
     )
     .uv_pip_install(
         "torch>=2.4",
+        "torchvision>=0.19",
         "trl==0.29.0",
         "transformers>=4.56.2",
         "datasets>=3.0",

@@ -25,6 +25,7 @@ cuda_image = (
         "numpy>=1.26",
         "scipy>=1.12",
         "torch>=2.4",
+        "ninja>=1.11",
     )
     # Python packages → add_local_python_source (auto-added to PYTHONPATH at /root)
     .add_local_python_source("verification", "openenv_env")
