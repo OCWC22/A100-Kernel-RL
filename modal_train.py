@@ -63,6 +63,7 @@ train_image = (
 app = modal.App(APP_NAME)
 checkpoints_vol = modal.Volume.from_name("kernelforge-checkpoints", create_if_missing=True)
 datasets_vol = modal.Volume.from_name("kernelforge-datasets", create_if_missing=True)
+hf_cache_vol = modal.Volume.from_name("kernelforge-hf-cache", create_if_missing=True)
 
 
 @app.function(
@@ -72,6 +73,7 @@ datasets_vol = modal.Volume.from_name("kernelforge-datasets", create_if_missing=
     volumes={
         "/checkpoints": checkpoints_vol,
         "/datasets": datasets_vol,
+        "/root/.cache/huggingface": hf_cache_vol,
     },
     include_source=True,
 )
