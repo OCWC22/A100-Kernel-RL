@@ -8,6 +8,7 @@
 | `DOUBLEGRAPH_A100.md` | DoubleGraph A100 kernel engineering prior |
 | `SKYDISCOVER_ADAEVOLVE_EVOX.md` | AdaEvolve/EvoX search-system prior |
 | `KERNELGYM_DR_KERNEL.md` | KernelGYM backend architecture and Dr. Kernel/TRLOO framing |
+| `SIMPLY_DEEPMIND.md` | Google DeepMind Simply — registry configs, PPO/GRPO reference, agent-first design |
 
 ## Recommended Reading Order
 
@@ -19,6 +20,8 @@
    - understand the lightweight OpenEnv wrapper over a KernelGYM-style backend
 4. **`SKYDISCOVER_ADAEVOLVE_EVOX.md`**
    - understand the search hedge beyond the GRPO loop
+5. **`SIMPLY_DEEPMIND.md`**
+   - understand registry-pattern configs, PPO/GRPO loss reference, agent-first design from DeepMind
 
 ## Current Repo Stance
 
@@ -43,3 +46,4 @@ External references:
 - [SkyDiscover repo](https://github.com/skydiscover-ai/skydiscover)
 - [AdaEvolve paper](https://arxiv.org/abs/2602.20133)
 - [EvoX paper](https://arxiv.org/abs/2602.23413)
+- [Simply repo](https://github.com/google-deepmind/simply)
