@@ -1,6 +1,4 @@
-"""Tests for reward distribution monitoring."""
-import math
-
+"""Tests for reward distribution monitoring (discrete rewards {-1, 1, 2, 3})."""
 from evaluation.reward_monitor import check_reward_distribution
 
 
@@ -11,20 +9,20 @@ def test_empty_rewards():
 
 
 def test_healthy_distribution():
-    rewards = [-1.0, -0.2, 0.0, 0.1, math.log(1.4), math.log(2.1)]
+    rewards = [-1.0, 1.0, 1.0, 2.0, 2.0, 3.0]
     result = check_reward_distribution(rewards)
     assert len(result["flags"]) == 0
     assert result["entropy"] > 0
 
 
 def test_all_max_reward_flagged():
-    rewards = [math.log(4.0)] * 100
+    rewards = [3.0] * 100
     result = check_reward_distribution(rewards)
     assert any("reward hacking" in f.lower() or "SUSPICIOUS" in f for f in result["flags"])
 
 
 def test_bimodal_flagged():
-    rewards = [-1.0] * 50 + [math.log(3.0)] * 50
+    rewards = [-1.0] * 50 + [3.0] * 50
     result = check_reward_distribution(rewards)
     assert any("bimodal" in f.lower() for f in result["flags"])
 
@@ -42,9 +40,9 @@ def test_no_positive_flagged():
 
 
 def test_tier_rates():
-    rewards = [-1.0, 0.0, math.log(1.25), math.log(2.0)]
+    rewards = [-1.0, 1.0, 2.0, 3.0]
     result = check_reward_distribution(rewards)
     assert result["tier_rates"]["fail_rate"] == 0.25
     assert result["tier_rates"]["correct_rate"] == 0.75
-    assert result["tier_rates"]["speedup_rate"] == 0.50
-    assert result["tier_rates"]["top_rate"] == 0.25
+    assert result["tier_rates"]["speedup_eager_rate"] == 0.50
+    assert result["tier_rates"]["speedup_compile_rate"] == 0.25

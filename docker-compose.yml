@@ -26,9 +26,9 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    command: ["python", "-m", "uvicorn", "openenv_env.kernel_forge_env:app", "--host", "0.0.0.0", "--port", "8080"]
+    command: ["python", "-m", "uvicorn", "openenv_env.server.app:app", "--host", "0.0.0.0", "--port", "8000"]
     ports:
-      - "8080:8080"
+      - "8000:8000"
     environment:
       - PYTHONUNBUFFERED=1
     volumes:

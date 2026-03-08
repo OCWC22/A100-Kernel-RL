@@ -33,7 +33,7 @@ if __package__ in {None, ""}:
     if str(ROOT) not in sys.path:
         sys.path.insert(0, str(ROOT))
 
-from trl import GRPOConfig
+from trl import GRPOConfig, GRPOTrainer
 
 from training.custom_grpo_trainer import TRLOOGRPOTrainer
 from training.model_loader import load_model_and_tokenizer
@@ -57,7 +57,15 @@ USE_BF16 = IS_LINUX
 # Multi-turn configuration
 MAX_TURNS = int(os.getenv("KERNELFORGE_STAGE3_MAX_TURNS", "3"))
 MAX_STEPS = int(os.getenv("KERNELFORGE_STAGE3_MAX_STEPS", "50"))
-MAX_COMPLETION_LENGTH = int(os.getenv("KERNELFORGE_STAGE3_MAX_COMPLETION_LENGTH", "1024"))
+MAX_COMPLETION_LENGTH = int(os.getenv("KERNELFORGE_STAGE3_MAX_COMPLETION_LENGTH", "768"))
+VLLM_MODE = os.getenv("KERNELFORGE_VLLM_MODE", "server").strip().lower()
+VLLM_SERVER_BASE_URL = os.getenv("KERNELFORGE_VLLM_SERVER_BASE_URL", "").strip()
+USE_TRLOO = os.getenv("KERNELFORGE_USE_TRLOO", "1") == "1"
+
+# GRPO config constants — used by both _validate_config() and grpo_kwargs
+PER_DEVICE_BATCH_SIZE = 1
+GRADIENT_ACCUMULATION_STEPS = 4
+NUM_GENERATIONS = 2
 # Local compile check controlled by KERNELFORGE_LOCAL_COMPILE in multi_turn_rollout.py.
 # Set KERNELFORGE_LOCAL_COMPILE=0 to skip local compile pre-check (slower but simpler).
 
@@ -121,6 +129,20 @@ def build_curriculum_dataset(num_prompts: int = 200) -> tuple[Dataset, list[dict
     return _dataset_from_rows(prompts), sampled_rows
 
 
+def _validate_config():
+    effective_batch = PER_DEVICE_BATCH_SIZE * GRADIENT_ACCUMULATION_STEPS
+    if effective_batch % NUM_GENERATIONS != 0:
+        raise ValueError(
+            f"Effective batch size ({effective_batch}) must be divisible by "
+            f"num_generations ({NUM_GENERATIONS}) per TRL GRPO requirement."
+        )
+    if USE_VLLM and VLLM_MODE == "server" and not VLLM_SERVER_BASE_URL:
+        raise ValueError(
+            "KERNELFORGE_USE_VLLM=1 with KERNELFORGE_VLLM_MODE=server requires "
+            "KERNELFORGE_VLLM_SERVER_BASE_URL to be set."
+        )
+
+
 # --- Training ---
 
 def main():
@@ -160,28 +182,47 @@ def main():
         problem_metadata=sampled_rows,
     )
 
-    config = GRPOConfig(
+    _validate_config()
+
+    grpo_kwargs = dict(
         learning_rate=3e-6,
-        temperature=0.7,         # Lower temp for exploitation
-        num_generations=2,
+        temperature=0.7,
+        num_generations=NUM_GENERATIONS,
+        num_iterations=1,
+        beta=0.0,                        # No ref model — saves memory
+        epsilon=0.2,
+        scale_rewards="batch",           # Better for sparse expensive env
+        remove_unused_columns=False,     # Custom rollout needs extra columns
+        max_prompt_length=3072,
         max_completion_length=MAX_COMPLETION_LENGTH,
-        per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
+        per_device_train_batch_size=PER_DEVICE_BATCH_SIZE,
+        gradient_accumulation_steps=GRADIENT_ACCUMULATION_STEPS,
         max_steps=MAX_STEPS,
         optim=OPTIMIZER,
         bf16=USE_BF16,
+        gradient_checkpointing=True,
         report_to="none",
         output_dir=OUTPUT_DIR,
         logging_steps=1,
+        save_steps=25,
+        save_total_limit=2,
         top_k=50,
         top_p=0.95,
         repetition_penalty=1.05,
-        use_vllm=USE_VLLM,
-        vllm_mode="colocate" if USE_VLLM else "server",
-        vllm_gpu_memory_utilization=VLLM_GPU_MEMORY_UTILIZATION,
     )
+    if USE_VLLM:
+        grpo_kwargs["use_vllm"] = True
+        grpo_kwargs["vllm_mode"] = VLLM_MODE
+        if VLLM_MODE == "server":
+            grpo_kwargs["vllm_server_base_url"] = VLLM_SERVER_BASE_URL
+        elif VLLM_MODE == "colocate":
+            grpo_kwargs["vllm_gpu_memory_utilization"] = VLLM_GPU_MEMORY_UTILIZATION
 
-    trainer = TRLOOGRPOTrainer(
+    config = GRPOConfig(**grpo_kwargs)
+
+    trainer_cls = TRLOOGRPOTrainer if USE_TRLOO else GRPOTrainer
+    print(f"  Trainer: {trainer_cls.__name__} (USE_TRLOO={USE_TRLOO})")
+    trainer = trainer_cls(
         model=model,
         processing_class=tokenizer,
         reward_funcs=[reward_from_env_with_curriculum],

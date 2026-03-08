@@ -7,8 +7,8 @@ from openenv_env.gpu_registry import GPU_REGISTRY, get_gpu_spec
 REQUIRED_KEYS = {"name", "arch", "l2_cache_mb", "sms", "nvcc_flag", "features"}
 
 
-def test_registry_has_three_gpus():
-    assert set(GPU_REGISTRY.keys()) == {"a100", "h100", "b200"}
+def test_registry_has_all_gpus():
+    assert set(GPU_REGISTRY.keys()) == {"a100", "h100", "b200", "h200"}
 
 
 @pytest.mark.parametrize("gpu", ["a100", "h100", "b200"])

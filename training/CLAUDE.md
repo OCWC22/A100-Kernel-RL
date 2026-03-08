@@ -27,7 +27,7 @@
 | **Optimizer** | paged_adamw_8bit | — | paged_adamw_8bit |
 | **Output** | `outputs/kernelforge-stage1` | `outputs/kernelforge-stage2` | `outputs/kernelforge-stage3` |
 
-**Shared**: bf16=True, max_prompt_length=512, max_completion_length=4096, top_k=50, top_p=0.95, repetition_penalty=1.05, use_vllm=True (colocate)
+**Shared**: bf16=True, max_prompt_length=512, max_completion_length=768, top_k=50, top_p=0.95, repetition_penalty=1.05, use_vllm=False (disabled for hackathon; set KERNELFORGE_USE_VLLM=1 to enable)
 
 ## LoRA Config (`model_loader.py`)
 
@@ -66,7 +66,7 @@ Returns TRL-compatible `rollout_func(prompt_ids, ...) -> dict` with keys:
 `prompt_ids`, `completion_ids`, `logprobs`, `env_reward`. Stage 3 uses `max_turns=3-5` per GRPO-15.1 hackathon config.
 
 ### Flow per completion:
-1. Generate response on H100 → `extract_cuda_code(text)` extracts ```cuda blocks
+1. Generate response on H200 → `extract_cuda_code(text)` extracts ```cuda blocks
 2. **`_local_compile_check(code)`** — nvcc -arch=sm_80 -c syntax check (**IMPLEMENTED**, saves ~50% Modal cost)
 3. If compiles locally → `_evaluate_on_modal(code, task_code)` — **A100 execution:** routes to `evaluate_ops6k_kernel` (Ops-6K) or `evaluate_kernel` (WCC)
 4. `_compute_reward_from_result(result)` → discrete milestone {-1, 1, 2, 3}

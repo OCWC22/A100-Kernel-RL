@@ -51,12 +51,13 @@ RUN chmod +x /app/training/*.py
 RUN chmod +x /app/datasets/*.py
 RUN chmod +x /app/verification/*.py
 
-# Expose ports for Streamlit demo
+# Expose ports for Streamlit demo and OpenEnv server
 EXPOSE 8501
+EXPOSE 8000
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=30s --start-period=5s --retries=3 \
     CMD python -c "import modal, cupy, networkx; print('OK')" || exit 1
 
-# Default command
-CMD ["python", "demo/streamlit_demo.py"]
+# Default command — env-switchable: KERNELFORGE_MODE=server for OpenEnv HTTP server
+CMD ["sh", "-c", "if [ \"$KERNELFORGE_MODE\" = 'server' ]; then python -m uvicorn openenv_env.server.app:app --host 0.0.0.0 --port 8000; else python demo/streamlit_demo.py; fi"]

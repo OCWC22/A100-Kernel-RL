@@ -9,10 +9,9 @@ import os
 from typing import Any
 from uuid import uuid4
 
-from pydantic import Field
-
-from openenv.core.env_server import Environment, create_fastapi_app
-from openenv.core.env_server.types import Action, Observation, State
+from openenv.core.env_server import Environment
+from openenv.core.env_server.types import State
+from openenv_env.models import KernelForgeAction, KernelForgeObservation
 from openenv_env.gpu_registry import get_gpu_spec
 from openenv_env.reward import compute_reward
 from openenv_env.skill_builder import build_skill_md
@@ -23,34 +22,7 @@ from training.task_support import (
 )
 
 
-class KernelForgeAction(Action):
-    """Action payload: CUDA kernel source code."""
-
-    cuda_code: str = Field(..., description="CUDA kernel source code string")
-
-
-class KernelForgeObservation(Observation):
-    """Observation payload returned by KernelForgeEnv."""
-
-    text: str = Field(..., description="Environment feedback text")
-    baseline_original_ms: float | None = None
-    baseline_doublegraph_ms: float | None = None
-    hardware: dict[str, Any] = Field(default_factory=dict)
-    turn: int = 0
-    best_reward: float = -1.0
-    info: dict[str, Any] = Field(default_factory=dict)
-    # Topology context: graph structure properties for topology-aware optimization
-    graph_properties: dict[str, Any] | None = Field(
-        default=None,
-        description="Graph topology properties (degree dist, density, diameter, etc.)",
-    )
-    topology_type: str | None = Field(
-        default=None,
-        description="Graph topology class: power-law, sparse-islands, dense-regular, etc.",
-    )
-
-
-class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, State]):
+class KernelForgeEnv(Environment):
     """
     RL environment: agent submits CUDA source -> target GPU compiles/verifies/benchmarks.
 
@@ -83,19 +55,13 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
         )
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
-    def reset(
-        self,
-        seed: int | None = None,
-        episode_id: str | None = None,
-        **kwargs: Any,
-    ) -> KernelForgeObservation:
+    def reset(self) -> KernelForgeObservation:
         """Reset environment. Profile baselines on first call."""
         self.history = []
         self.turn = 0
         self.best_reward = -1.0
         self.best_code = None
-        self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
-        self.current_task = normalize_task_row(kwargs or self.current_task)
+        self._state = State(episode_id=str(uuid4()), step_count=0)
 
         if (
             self.original_baseline_ms is None
@@ -122,12 +88,7 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
             topology_type=self.current_task.get("topology"),
         )
 
-    def step(
-        self,
-        action: KernelForgeAction,
-        timeout_s: float | None = None,
-        **kwargs: Any,
-    ) -> KernelForgeObservation:
+    def step(self, action: KernelForgeAction) -> KernelForgeObservation:
         """Execute one environment step from CUDA source code action."""
         self.turn += 1
         self._state.step_count = self.turn
@@ -236,6 +197,11 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
             best_reward=self.best_reward,
         )
 
+    def close(self):
+        """Clean up episode resources."""
+        self.history = []
+        self.current_task = None
+
     def _modal(self, fn_name, payload=None):
         """Dispatch to configured Modal app."""
         import modal
@@ -243,9 +209,3 @@ class KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, Stat
         if payload is None:
             return fn.remote()
         return fn.remote(payload)
-
-
-
-# OpenEnv HTTP server entrypoint
-# Run: uvicorn openenv_env.kernel_forge_env:app --host 0.0.0.0 --port 8080
-app = create_fastapi_app(KernelForgeEnv, KernelForgeAction, KernelForgeObservation)

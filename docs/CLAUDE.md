@@ -70,10 +70,10 @@ Source: [modal.com/pricing](https://modal.com/pricing)
 |---------|-------|
 | Top | Core Recommendation (hackathon path + what we need to prove) |
 | GRPO-1 | The Algorithm (Full Math) |
-| GRPO-2 | Memory Budget (H100 primary, B200 future) |
+| GRPO-2 | Memory Budget (H200 primary, B200 future) |
 | GRPO-3 | TRL GRPOTrainer — Exact Configuration |
 | GRPO-4 | MARS+TRLOO Credit Assignment (Multi-Turn) — MARS is DROPPED |
-| GRPO-5 | Compute Budget (Hackathon: H100 + A100) |
+| GRPO-5 | Compute Budget (Hackathon: H200 + A100) |
 | GRPO-6 | What To Monitor During Training |
 | GRPO-7 | Critical Implementation Notes |
 | GRPO-8 | Quick Reference Card (hackathon config) |

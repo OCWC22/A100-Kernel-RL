@@ -1,9 +1,9 @@
 # KernelForge GRPO Deep Dive
-## Hackathon Path: Structured Priors + H100 Training + A100 Evaluation
+## Hackathon Path: Structured Priors + H200 Training + A100 Evaluation
 **Purpose:** Explain the RL strategy that actually fits the hackathon.
-**Primary hardware:** H100 for training, A100 80GB for evaluation
+**Primary hardware:** H200 ($4.54/hr, 141GB) for training, A100 80GB for evaluation
 **Primary model:** Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active, 128 experts / 8 active, 256K context)
-**Last Updated:** March 6, 2026
+**Last Updated:** March 7, 2026
 
 > **IMPORTANT — Hackathon-Scoped GRPO Strategy (March 2026)**
 >
@@ -11,7 +11,7 @@
 >
 > This document is now centered on the actual hackathon path:
 > 1. **Use Qwen3-Coder-30B-A3B-Instruct as the primary model.**
-> 2. **Use H100 for training and A100 80GB for evaluation.**
+> 2. **Use H200 for training and A100 80GB for evaluation.**
 > 3. **Use DoubleGraph, `skills.md`, and curated CUDA-Agent-style tasks as structured priors before RL begins.**
 > 4. **Use SFT first, then a small-budget GRPO pilot.**
 > 5. **Treat deeper multi-turn / larger-model / B200 work as future scale-up.**
@@ -24,7 +24,7 @@
 
 ### Hackathon recommendation
 - **Start from structured priors**, then do SFT warmup, then GRPO pilot, then search / best-of-N as a hedge
-- Model: Qwen3-Coder-30B-A3B-Instruct on H100
+- Model: Qwen3-Coder-30B-A3B-Instruct on H200
 - Eval: A100 80GB via Modal
 - Priors: DoubleGraph kernels + `skills.md` + curated CUDA-Agent-style tasks
 - G=2, short context, discrete milestone reward {-1, 1, 2, 3}, execution-based correctness, limited-step run with hard abort gates
@@ -53,7 +53,7 @@ The sections below are primarily **reference material** for implementation and m
 
 This section explains **everything from first principles**, as if you have never seen RL before. No assumptions. Every equation is derived step-by-step with intuition, a simple numerical example, the thought process behind why people invented it, the exact problem it solves (or fails to solve), and how the 2026 papers (real ones like arXiv 2601.08521 "Your Group-Relative Advantage Is Biased" and analogs to Dr. Kernel/TRLOO) fix it.
 
-This is tailored to **your exact use-case**: training Qwen3-Coder-30B-A3B-Instruct on H100 to write A100 CUDA kernels using the CUDA-Agent eval pipeline (compile → verify → profile). The rewards are sparse (most kernels don't compile or are slow), which is exactly why the hackathon path starts by narrowing the search with DoubleGraph, `skills.md`, and curated CUDA-Agent-style tasks before attempting RL.
+This is tailored to **your exact use-case**: training Qwen3-Coder-30B-A3B-Instruct on H200 to write A100 CUDA kernels using the CUDA-Agent eval pipeline (compile → verify → profile). The rewards are sparse (most kernels don't compile or are slow), which is exactly why the hackathon path starts by narrowing the search with DoubleGraph, `skills.md`, and curated CUDA-Agent-style tasks before attempting RL.
 
 ### 1. RL Basics – Why We Even Need "Advantage" (First Principles)
 
@@ -351,11 +351,11 @@ return unbiased.tolist()
 
 That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 
-### 6. Why This Works for the Hackathon Stack (H100 + Modal A100 + CUDA-Agent)
+### 6. Why This Works for the Hackathon Stack (H200 + Modal A100 + CUDA-Agent)
 
 - Rewards come from **CUDA events timing on Modal A100** + execution-based correctness (discrete milestone {-1, 1, 2, 3})
 - G=2 keeps eval budget low, TRLOO N/(N-1) fixes the bias
-- Hackathon config: Qwen3-Coder-30B-A3B-Instruct on H100 gen + A100 eval
+- Hackathon config: Qwen3-Coder-30B-A3B-Instruct on H200 gen + A100 eval
 - **Expert demonstrations**: 192 A100 kernels from doubleGraph as SFT data (`doublegraph_sft.jsonl`) + combined RL prompts (`combined_kernelforge.jsonl`)
 - **Rich SKILL.md**: 178 lines with 7 real A100 patterns from production code via `skill_builder.py:_append_a100_patterns()`
 - **SkyDiscover parallel hedge**: `skydiscover_integration/evaluator.py` bridges evolutionary search to same Modal A100 eval pipeline
@@ -535,12 +535,12 @@ Effective GRPO memory = 1 model + LoRA adapters + optimizer states
 
 ## GRPO-2: Memory Budget
 
-> **Hackathon primary:** H100 80GB with Qwen3-Coder-30B-A3B-Instruct. The B200 192GB budgets below are preserved for future scale-up reference only.
+> **Hackathon primary:** H200 141GB with Qwen3-Coder-30B-A3B-Instruct. The B200 192GB budgets below are preserved for future scale-up reference only.
 
 ### Model: Qwen3-Coder-30B-A3B-Instruct (MoE, 3.3B active) — HACKATHON PRIMARY
 
 ```
-H100 Total VRAM: 80 GB
+H200 Total VRAM: 141 GB
 
 COMPONENT                          MEMORY        NOTES
 ─────────────────────────────────────────────────────────
@@ -555,15 +555,15 @@ Reference logprobs                 ~2.0 GB       LoRA disabled = reference behav
 TOTAL MODEL + TRAINING             ~30-34 GB
 ─────────────────────────────────────────────────────────
 
-REMAINING FREE                     ~46-50 GB     ← Ample headroom on H100
+REMAINING FREE                     ~107-111 GB   ← Ample headroom on H200
 ```
 
-This is the hackathon default. The model fits comfortably on H100 with substantial margin.
+This is the hackathon default. The model fits comfortably on H200 with substantial margin.
 
 ### Model: Qwen3.5-35B-A3B (MoE, 3B active per token) — FALLBACK SCENARIO
 
 ```
-H100 Total VRAM: 80 GB
+H200 Total VRAM: 141 GB
 
 COMPONENT                          MEMORY        NOTES
 ─────────────────────────────────────────────────────────
@@ -578,10 +578,10 @@ Reference logprobs                 ~2.0 GB       LoRA disabled = reference behav
 TOTAL MODEL + TRAINING             ~34.5 GB
 ─────────────────────────────────────────────────────────
 
-REMAINING FREE                     ~45.5 GB      ← Comfortable fit on H100
+REMAINING FREE                     ~106.5 GB     ← Comfortable fit on H200
 ```
 
-> **Note:** Eval runs on Modal A100, not co-located. H100 only handles model weights, generation, and gradient updates.
+> **Note:** Eval runs on Modal A100, not co-located. H200 only handles model weights, generation, and gradient updates.
 
 ### Model: Qwen3.5-9B (Dense)
 
@@ -593,7 +593,7 @@ LoRA + optimizer                   ~1.5 GB
 Activations + KV cache             ~6 GB
 ─────────────────────────────────────────────────────────
 TOTAL                              ~12.5 GB
-REMAINING (H100)                   ~67.5 GB
+REMAINING (H200)                   ~128.5 GB
 REMAINING (B200, future)           ~179.5 GB
 ```
 
@@ -607,10 +607,11 @@ LoRA + optimizer                   ~3 GB
 Activations + KV cache             ~12 GB
 ─────────────────────────────────────────────────────────
 TOTAL                              ~100 GB
-REMAINING (B200 192GB)             ~92 GB         Requires B200 — does NOT fit on H100
+REMAINING (H200 141GB)             ~41 GB         Fits on H200 (141GB) — tight but feasible. Requires B200 for comfortable headroom.
+REMAINING (B200 192GB)             ~92 GB         Comfortable fit on B200
 ```
 
-**Conclusion:** On H100, Qwen3-Coder-30B-A3B-Instruct fits comfortably with ~46-50GB free. Qwen3-Coder-Next 80B requires B200 (future scale-up). The hackathon default is the 30B model on H100.
+**Conclusion:** On H200, Qwen3-Coder-30B-A3B-Instruct fits comfortably with ~107-111GB free. Qwen3-Coder-Next 80B fits on H200 (tight, ~41GB free) but B200 provides more headroom. The hackathon default is the 30B model on H200.
 
 ---
 
@@ -900,7 +901,7 @@ def prepare_grpo_dataset(stage: str = "warmup") -> Dataset:
 training/run_all_stages.py
 
 Complete 3-stage GRPO pipeline for CUDA kernel optimization.
-Runs on H100 80GB. Targets A100 sm_80 kernels.
+Runs on H200 141GB. Targets A100 sm_80 kernels.
 
 Usage:
     python training/run_all_stages.py \
@@ -962,7 +963,7 @@ def run_stage1(model, tokenizer, output_dir: str):
         # No separate reference model needed in memory
         
         # Generation
-        max_completion_length=4096,   # CUDA kernels are 50-300 lines
+        max_completion_length=768,    # CUDA kernels are 50-300 lines
         temperature=1.0,              # High for diverse exploration in warmup
         # Higher = more diverse = stronger GRPO signal.
         
@@ -976,7 +977,7 @@ def run_stage1(model, tokenizer, output_dir: str):
         learning_rate=2e-6,           # Conservative — preserve base model capabilities
         
         # Precision
-        bf16=True,                    # BF16 training on H100
+        bf16=True,                    # BF16 training on H200
         
         # Logging
         logging_steps=1,              # Log every step (watch the reward!)
@@ -1095,7 +1096,7 @@ def run_stage3(model, tokenizer, output_dir: str):
         max_grad_norm=1.0,
 
         # Generation — lower temperature for exploitation
-        max_completion_length=4096,
+        max_completion_length=768,
         temperature=0.7,   # Lower for Stage 3 exploitation
         
         # Training
@@ -1192,7 +1193,7 @@ def main():
     model, tokenizer = FastLanguageModel.from_pretrained(
         model_name=args.model,
         max_seq_length=8192,
-        dtype=None,  # Auto-detect (BF16 on H100)
+        dtype=None,  # Auto-detect (BF16 on H200)
         load_in_4bit=args.load_in_4bit,
     )
     
@@ -1472,9 +1473,9 @@ KERNELFORGE_STAGE3_MAX_STEPS=5 KERNELFORGE_STAGE3_LOCAL_ONLY=1 \
 
 ---
 
-## GRPO-5: Compute Budget (Hackathon: H100 + A100)
+## GRPO-5: Compute Budget (Hackathon: H200 + A100)
 
-> **Hackathon budget target: <$200 total.** H100 at $3.95/hr, A100 80GB at $2.50/hr. See PRD Section 6 for budget breakdown.
+> **Hackathon budget target: <$200 total.** H200 at $4.54/hr, A100 80GB at $2.50/hr. See PRD Section 6 for budget breakdown.
 
 ### Time Per GRPO Step
 
@@ -1499,9 +1500,9 @@ TOTAL PER STEP (multi-turn, 3T):   ~270-930s    ~4.5-15 minutes
 |-------|-------|-----------|------------|-------------------|
 | Stage 1 (300 steps, 3 turns) | 300 | ~5 min | ~25 hours | 3,600 |
 | Stage 2 (RFT, SFT) | N/A | N/A | ~30 min | 100 |
-| Stage 3 (pilot, H100+A100) | 50 | ~2 min | ~2 hours | 100 |
+| Stage 3 (pilot, H200+A100) | 50 | ~2 min | ~2 hours | 100 |
 
-**Reality check (revised):** Stage 3 is a GRPO pilot (H100 generates, A100 evaluates via Modal). Full pipeline: ~2 hrs (Stage 1) + 30 min (Stage 2) + 2 hrs (Stage 3) = ~4.5 hours. Stage 3 only runs if Gate G-0.8 passes.
+**Reality check (revised):** Stage 3 is a GRPO pilot (H200 generates, A100 evaluates via Modal). Full pipeline: ~2 hrs (Stage 1) + 30 min (Stage 2) + 2 hrs (Stage 3) = ~4.5 hours. Stage 3 only runs if Gate G-0.8 passes.
 
 ### Hackathon-Adjusted Budget
 
@@ -1596,6 +1597,11 @@ policy_logprobs = model.forward(input_ids)   # Current policy
 
 ### 7.2 vLLM Colocate Mode (Single GPU)
 
+> **Caveat (March 2026):**
+> - vLLM is **disabled by default** for the hackathon (`KERNELFORGE_USE_VLLM=0`).
+> - When enabled, the default mode is **"server"** (not "colocate").
+> - vLLM kwargs (e.g., `vllm_gpu_memory_utilization`) are only passed conditionally when `USE_VLLM=True`.
+
 For generation during GRPO, TRL can use vLLM in "colocate" mode — vLLM runs in the same process as training, sharing GPU memory.
 
 ```python
@@ -1658,7 +1664,7 @@ GRPO ALGORITHM SUMMARY:
 
 HACKATHON CONFIGURATION (March 5, 2026):
   Model = Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active)
-  Train GPU = H100 ($3.95/hr)
+  Train GPU = H200 ($4.54/hr, 141GB)
   Eval GPU = A100 80GB ($2.50/hr)
   G = 2 (num_generations)
   β = 0.0 (no KL penalty, DAPO style)
@@ -1667,22 +1673,22 @@ HACKATHON CONFIGURATION (March 5, 2026):
   Temperature = 1.0 (Stage 1) → 0.7 (Stage 3)
   Learning rate = 2e-6 (Stage 1) → 3e-6 (Stage 3)
   LoRA rank = 16, target = qkvo + gate/up/down
-  Credit = TRLOO only (MARS DROPPED — see GRPO-4)
+  Credit = TRLOO only (default; set `KERNELFORGE_USE_TRLOO=0` to use vanilla GRPO) (MARS DROPPED — see GRPO-4)
   Eval = Hybrid: local nvcc+PAC early turns, Modal A100 final turn (GRPO-10)
   Loss = standard clip (MASPO DEFERRED — see GRPO-12)
   Pruning = CPPO DROPPED (see GRPO-11)
 
-H100 MEMORY:
-  Coder-30B-A3B 4-bit: ~30-34 GB total → ~46-50 GB free (PRIMARY)
-  35B-A3B 4-bit: ~34.5 GB total → ~45.5 GB free (FALLBACK)
-  Coder-Next 80B FP8: ~100 GB → DOES NOT FIT (future B200 only)
+H200 MEMORY (141 GB total):
+  Coder-30B-A3B bf16: ~61 GB total → ~80 GB free (PRIMARY)
+  35B-A3B bf16: ~65 GB total → ~76 GB free (FALLBACK)
+  Coder-Next 80B FP8: ~100 GB → fits on H200 but tight (future B200 preferred)
 
 HACKATHON BUDGET:
   Stage 1: 100 steps × ~2 min = ~3.5 hours
   Stage 2: RFT = ~30 min
   Stage 3: 50 steps × ~2 min = ~2 hours (pilot)
   Total: ~6 hours training + eval
-  Cost: ~$60-100 (H100 + A100)
+  Cost: ~$60-100 (H200 + A100)
 
 ABORT CONDITIONS:
   Reward mean stays at -1.0 after 30 steps → model can't compile
@@ -1782,7 +1788,7 @@ def trloo_post_process(advantages: list[float], n: int) -> list[float]:
 
 ### The Problem (Section 6.1, Risk 1.2)
 
-Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. All stages use Modal A100 for correctness+timing; H100 handles local compile pre-checks only.
+Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. All stages use Modal A100 for correctness+timing; H200 handles local compile pre-checks only.
 
 ### The Fix: Local Cheap Eval for Early Turns, Modal for Final
 
@@ -2078,7 +2084,7 @@ For each GRPO step:
 ### Stage Configurations (Revised)
 
 ```
-STAGE 1 — WARM-UP (Qwen3-Coder-30B-A3B-Instruct on H100):
+STAGE 1 — WARM-UP (Qwen3-Coder-30B-A3B-Instruct on H200):
   Steps: 100
   G: 2
   Max turns: 3
@@ -2094,13 +2100,13 @@ STAGE 2 — RFT:
   SFT: 3 epochs on filtered trajectories + 192 doubleGraph expert demonstrations
   Goal: Anchor compilation ability + expose model to real A100 patterns
 
-STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H100) — HACKATHON CONFIG:
+STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H200) — HACKATHON CONFIG:
   Steps: 50 (hackathon pilot; 150 is future scale-up target)
   G: 2
   Max turns: 3-5 (hackathon; 20 is future target)
   Temperature: 0.7
   LR: 3e-6
-  Context: 8,192 tokens (H100: ~46GB free — ample headroom)
+  Context: 8,192 tokens (H200: ~107GB free — ample headroom)
   Action: Free-form generation with SKILL.md context (7 real A100 patterns via skill_builder.py)
   Eval: Hybrid — local nvcc early turns, Modal A100 final turn
   Credit: TRLOO only (MARS DROPPED — see GRPO-4; CPPO DROPPED — see GRPO-11)
@@ -2204,18 +2210,18 @@ Why these projections are plausible (research basis):
 
 ```
 HACKATHON STAGE 3 — GRPO PILOT
-  Model: Qwen3-Coder-30B-A3B-Instruct on H100
+  Model: Qwen3-Coder-30B-A3B-Instruct on H200
   Steps: 50 (pilot — validate signal, not benchmark domination)
   G: 2
   Max turns: 3-5
   Temperature: 0.7
   LR: 3e-6
-  Context: 8,192 tokens (H100: ~46GB free)
+  Context: 8,192 tokens (H200: ~80GB free)
   Eval: Hybrid — local nvcc early turns, Modal A100 final turn
-  Credit: TRLOO only (MARS DROPPED — see GRPO-4)
+  Credit: TRLOO only (default; set `KERNELFORGE_USE_TRLOO=0` to use vanilla GRPO) (MARS DROPPED — see GRPO-4)
   Reward: Discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
   Loss: Standard clip
-  Cost: ~$30-50 (H100 training) + ~$20-40 (A100 eval)
+  Cost: ~$30-50 (H200 training) + ~$20-40 (A100 eval)
 
 OBJECTIVE:
   1. Validate real reward signal (not hackable, not degenerate)
@@ -2328,7 +2334,7 @@ Full pipeline:
 
 ### Model Size Discussion (Future Scale-Up Context)
 
-For the **hackathon**, the primary model is **Qwen3-Coder-30B-A3B-Instruct** on H100 (see Section 15.1). The discussion below applies to the future B200 scale-up path.
+For the **hackathon**, the primary model is **Qwen3-Coder-30B-A3B-Instruct** on H200 (see Section 15.1). The discussion below applies to the future B200 scale-up path.
 
 Qwen3-Coder-Next 80B MoE has **only 3B active parameters** due to MoE routing. At inference, it runs like a 3B model but has access to 80B of stored routing knowledge from pre-training on 800K executable code tasks.
 
@@ -2339,7 +2345,7 @@ Qwen3-Coder-Next 80B MoE has **only 3B active parameters** due to MoE routing. A
 | Qwen3.5-32B | 32B | ~32 GB | ~80 | Strong | Moderate |
 | Qwen3.5-9B | 9B | ~9 GB | ~150 | Moderate | Weak |
 
-**Hackathon decision:** Use Qwen3-Coder-30B-A3B-Instruct on H100. Fall back to Qwen3.5-35B-A3B if needed.
+**Hackathon decision:** Use Qwen3-Coder-30B-A3B-Instruct on H200. Fall back to Qwen3.5-35B-A3B if needed.
 **Future decision:** Scale to Qwen3-Coder-Next 80B FP8 on B200 for deeper experiments.
 
 ### Updated Quick Reference Card (March 5, 2026)
@@ -2349,13 +2355,13 @@ Qwen3-Coder-Next 80B MoE has **only 3B active parameters** due to MoE routing. A
 HACKATHON CONFIG (PRIMARY — this weekend)
 ═══════════════════════════════════════════════════════════
   Model = Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active)
-  Train GPU = H100 ($3.95/hr)
+  Train GPU = H200 ($4.54/hr, 141GB)
   Eval GPU = A100 80GB ($2.50/hr)
   G = 2
   Steps = 100 (Stage 1) + RFT + 50 (Stage 3 pilot)
   Max turns = 3 (Stage 1) / 3-5 (Stage 3)
   Context = 8192
-  Credit = TRLOO only (MARS DROPPED — see GRPO-4)
+  Credit = TRLOO only (default; set `KERNELFORGE_USE_TRLOO=0` to use vanilla GRPO) (MARS DROPPED — see GRPO-4)
   Reward = discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
   Loss = standard clip (MASPO DEFERRED — see GRPO-12)
   Eval = Hybrid: local nvcc early turns, Modal A100 final turn
@@ -2413,7 +2419,7 @@ When talking to judges or writing the demo narrative:
 **Say:**
 - "We built a low-cost kernel optimization RL/search environment"
 - "We targeted A100 kernels with real compile / correctness / timing feedback"
-- "We used Qwen3-Coder-30B-A3B-Instruct on H100 as the practical hackathon base"
+- "We used Qwen3-Coder-30B-A3B-Instruct on H200 as the practical hackathon base"
 - "This is designed to scale into richer RL, distillation, and future hardware"
 
 **Do NOT say:**
@@ -2434,7 +2440,7 @@ Abort or shrink RL scope if any of these trigger:
 | reward=-1 stays after 30 SFT+GRPO steps | Dataset or reward pipeline is broken | Debug reward. If unfixable, ship SFT + search only. |
 | reward std=0 for >5 consecutive steps | Model collapsed, all outputs identical | Increase temperature to 1.2. If persists, stop GRPO. |
 | Loss = NaN | LR too high or numerical instability | Reduce LR to 1e-6. If persists, stop GRPO. |
-| OOM | Model/context too large for H100 | Reduce G to 1, reduce context, reduce batch. |
+| OOM | Model/context too large for H200 | Reduce G to 1, reduce context, reduce batch. |
 | Eval throughput eats >60% of budget | A100 eval calls too expensive | Simplify to single-turn, reduce step count. |
 | Gate G-0.8 fails (no speedup >1.2× in 5-step sanity check) | Model cannot optimize on this task distribution | Abandon GRPO entirely. Ship SFT + SkyDiscover + environment. |
 

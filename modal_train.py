@@ -40,6 +40,7 @@ train_image = (
         "bitsandbytes>=0.45",
         "openenv-core[core]>=0.2.1",
         "numpy>=1.26",
+        "vllm>=0.10.2",
         "modal>=0.70",
     )
     # Unsloth installed separately to bypass stale trl<=0.24.0 cap.
@@ -97,6 +98,12 @@ def train(stage: int = 1, max_steps: int | None = None, dry_run: bool = False):
     os.environ["KERNELFORGE_STAGE2_OUTPUT"] = "/checkpoints/stage2"
     os.environ["KERNELFORGE_STAGE3_OUTPUT"] = "/checkpoints/stage3"
     os.environ.setdefault("KERNELFORGE_USE_VLLM", "0")
+    os.environ.setdefault("KERNELFORGE_VLLM_MODE", "server")
+    os.environ.setdefault("KERNELFORGE_VLLM_SERVER_BASE_URL", "")
+    os.environ.setdefault("KERNELFORGE_USE_TRLOO", "1")
+    os.environ.setdefault("KERNELFORGE_STAGE3_SCALE_REWARDS", "batch")
+    os.environ.setdefault("KERNELFORGE_STAGE3_BETA", "0.0")
+    os.environ.setdefault("KERNELFORGE_STAGE3_MAX_PROMPT_LENGTH", "3072")
     os.environ.setdefault("KERNELFORGE_STAGE1_MAX_TURNS", "3")
     os.environ.setdefault("KERNELFORGE_STAGE3_MAX_TURNS", "3")
     os.environ.setdefault("CUDA_AGENT_STAGE1_SAMPLES", "100")

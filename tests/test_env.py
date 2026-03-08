@@ -1,13 +1,8 @@
 """Tests for KernelForge OpenEnv environment contract."""
-import math
 import pytest
 from unittest.mock import patch, MagicMock
 
-from openenv_env.kernel_forge_env import (
-    KernelForgeEnv,
-    KernelForgeAction,
-    KernelForgeObservation,
-)
+from openenv_env import KernelForgeEnv, KernelForgeAction, KernelForgeObservation
 
 
 @pytest.fixture
@@ -77,9 +72,8 @@ def test_step_correct_kernel(env):
     action = KernelForgeAction(cuda_code="__global__ void k(){}")
     obs = e.step(action)
 
-    # speedup = 10.0/12.0 ≈ 0.833 → log(0.833) ≈ -0.182
-    expected = math.log(10.0 / 12.0)
-    assert obs.reward == pytest.approx(expected, abs=1e-3)
+    # speedup = 10.0/12.0 ≈ 0.833, not > 1.05 → discrete reward 1.0
+    assert obs.reward == 1.0
     assert "BENCHMARK" in obs.text
 
 
@@ -98,8 +92,8 @@ def test_step_fast_kernel(env):
     action = KernelForgeAction(cuda_code="__global__ void k(){}")
     obs = e.step(action)
 
-    # speedup = 10.0/5.0 = 2.0 → log(2.0) ≈ 0.693
-    assert obs.reward == pytest.approx(math.log(2.0), abs=1e-3)
+    # speedup = 10.0/5.0 = 2.0 > 1.05 → discrete reward 2.0
+    assert obs.reward == 2.0
 
 
 def test_done_at_max_turns(env):

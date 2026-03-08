@@ -29,6 +29,8 @@ from training.task_support import (
 MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_LOCAL_COMPILE", "1") == "1"
 TARGET_CUDA_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
+MAX_FEEDBACK_CHARS = int(os.getenv("KERNELFORGE_MAX_FEEDBACK_CHARS", "1200"))
+MAX_ERROR_CHARS = int(os.getenv("KERNELFORGE_MAX_ERROR_CHARS", "800"))
 ROLLOUT_LOG_PATH = Path(
     os.getenv("KERNELFORGE_ROLLOUT_LOG", "outputs/rollout_metrics.jsonl")
 ).resolve()
@@ -107,7 +109,7 @@ def _format_feedback(result: dict, reward: float, turn: int) -> str:
 
     if not result.get("compiles"):
         error = result.get("error", "unknown compilation error")
-        parts.append(f"COMPILATION FAILED:\n{error[:800]}")
+        parts.append(f"COMPILATION FAILED:\n{error[:MAX_ERROR_CHARS]}")
         parts.append("Fix the compilation errors above and resubmit.")
     elif not result.get("correct"):
         msg = result.get("verifier_msg") or result.get("error") or "unknown verification failure"
@@ -139,7 +141,8 @@ def _format_feedback(result: dict, reward: float, turn: int) -> str:
                 "beating torch.compile with better occupancy or warp-level primitives."
             )
 
-    return "\n".join(parts)
+    feedback = "\n".join(parts)
+    return feedback[:MAX_FEEDBACK_CHARS]
 
 
 _baselines_cache: dict[str, Any] | None = None
@@ -161,7 +164,7 @@ def _get_baselines() -> tuple[float | None, float | None]:
 
 
 def make_multi_turn_rollout(
-    max_turns: int = 5,
+    max_turns: int = 3,
     skill_md_gpu: str | None = None,
     problem_metadata: list[dict] | None = None,
 ) -> Callable:
@@ -264,7 +267,11 @@ def make_multi_turn_rollout(
                     break
 
                 feedback = _format_feedback(result, reward, turn)
-                current_prompt = f"{current_prompt}\n\n{completion_text}\n\n{feedback}"
+                current_prompt = build_generation_prompt(
+                    task_row,
+                    skill_context=skill_context,
+                    topology_context=topology_ctx,
+                ) + f"\n\n{feedback}"
 
             all_prompt_ids.append(episode_prompt_ids)
             all_completion_ids.append(episode_completion_ids)

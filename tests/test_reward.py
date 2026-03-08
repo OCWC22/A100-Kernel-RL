@@ -1,5 +1,4 @@
-"""Tests for continuous reward computation — log(speedup) + Nsight bonus."""
-import math
+"""Tests for discrete milestone reward computation {-1, 1, 2, 3}."""
 import pytest
 
 from openenv_env.reward import compute_reward, trloo_post_process
@@ -14,54 +13,58 @@ def test_correct_fail():
 
 
 def test_correct_no_speedup():
-    """speedup=1.0 → log(1.0) = 0.0"""
+    """Correct but speedup=1.0 (not > 1.05) -> reward 1.0."""
     r = compute_reward(compiled=True, correct=True, speedup_vs_eager=1.0, speedup_vs_compile=0.9)
-    assert r == pytest.approx(0.0, abs=1e-6)
+    assert r == 1.0
 
 
 def test_modest_speedup():
-    """speedup=1.5 → log(1.5) ≈ 0.405"""
+    """speedup_vs_eager=1.5 > 1.05 -> reward 2.0."""
     r = compute_reward(compiled=True, correct=True, speedup_vs_eager=1.5, speedup_vs_compile=0.9)
-    assert r == pytest.approx(math.log(1.5), abs=1e-4)
+    assert r == 2.0
 
 
 def test_large_speedup():
-    """speedup=3.0 → log(3.0) ≈ 1.099"""
+    """speedup_vs_eager=3.0 > 1.05 but speedup_vs_compile=1.0 not > 1.05 -> reward 2.0."""
     r = compute_reward(compiled=True, correct=True, speedup_vs_eager=3.0, speedup_vs_compile=1.0)
-    assert r == pytest.approx(math.log(3.0), abs=1e-4)
+    assert r == 2.0
 
 
 def test_slower_than_baseline():
-    """speedup=0.5 → log(0.5) ≈ -0.693 (negative but not -1.0 — kernel IS correct)"""
+    """Correct but speedup=0.5 < 1.05 -> reward 1.0."""
     r = compute_reward(compiled=True, correct=True, speedup_vs_eager=0.5, speedup_vs_compile=0.3)
-    assert r == pytest.approx(math.log(0.5), abs=1e-4)
+    assert r == 1.0
 
 
 def test_very_slow_clamped():
-    """speedup near 0 → clamped to log(0.1) = -2.302"""
+    """Correct but speedup=0.01 < 1.05 -> reward 1.0."""
     r = compute_reward(compiled=True, correct=True, speedup_vs_eager=0.01, speedup_vs_compile=0)
-    assert r == pytest.approx(math.log(0.1), abs=1e-4)
+    assert r == 1.0
 
 
-def test_nsight_bonus():
-    """Nsight metrics add bonus on top of log(speedup)."""
+def test_nsight_ignored():
+    """Nsight metrics are accepted but unused in discrete mode — same reward as without."""
     base = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=1.0)
     with_nsight = compute_reward(
         compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=1.0,
         occupancy=0.8, mem_coalescing=0.9, warp_efficiency=0.7,
     )
-    expected_bonus = 0.4 * 0.8 + 0.3 * 0.9 + 0.2 * 0.7  # 0.32 + 0.27 + 0.14 = 0.73
-    assert with_nsight == pytest.approx(base + expected_bonus, abs=1e-4)
+    assert with_nsight == base == 2.0
 
 
-def test_nsight_clamped():
-    """Nsight values clamped to [0, 1]."""
+def test_nsight_extreme_values():
+    """Nsight with out-of-range values still produces same discrete reward."""
     r = compute_reward(
         compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=1.0,
         occupancy=1.5, mem_coalescing=-0.1, warp_efficiency=0.5,
     )
-    expected = math.log(2.0) + 0.4 * 1.0 + 0.3 * 0.0 + 0.2 * 0.5
-    assert r == pytest.approx(expected, abs=1e-4)
+    assert r == 2.0
+
+
+def test_beats_torch_compile():
+    """speedup_vs_compile=1.2 > 1.05 -> reward 3.0."""
+    r = compute_reward(compiled=True, correct=True, speedup_vs_eager=2.0, speedup_vs_compile=1.2)
+    assert r == 3.0
 
 
 def test_trloo_post_process_g4():
