@@ -47,7 +47,9 @@ train_image = (
     # Unsloth installed separately to bypass stale trl<=0.24.0 cap.
     # Keep this fail-fast so missing core deps are caught at image build time.
     .run_commands("pip install --no-deps unsloth unsloth_zoo")
-    .run_commands("pip install --no-build-isolation 'flash-attn>=2.7' 2>/dev/null || true")
+    .run_commands("pip install 'https://github.com/lesj0610/flash-attention/releases/download/v2.8.3-cu12-torch2.10-cp312/flash_attn-2.8.3+cu12torch2.10cxx11abiTRUE-cp312-cp312-linux_x86_64.whl' 2>/dev/null || true")
+    .env({"HF_HUB_ENABLE_HF_TRANSFER": "1"})
+    .pip_install("hf_transfer")
     .add_local_python_source(
         "training", "openenv_env", "evaluation", "verification",
     )

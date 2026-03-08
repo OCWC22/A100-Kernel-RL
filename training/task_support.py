@@ -12,8 +12,6 @@ import json
 from collections import Counter
 from typing import Any
 
-from openenv_env.reward import compute_reward
-
 SUPPORTED_WCC_OPS = {"weakly_connected_components", "wcc"}
 STATEFUL_MODULE_TOKENS = (
     "nn.Conv",
@@ -262,6 +260,8 @@ def normalize_eval_result(result: dict[str, Any] | None) -> dict[str, Any]:
 
 def compute_task_reward(result: dict[str, Any] | None) -> float:
     """Compute the canonical reward from a normalized evaluator result."""
+    from openenv_env.reward import compute_reward
+
     normalized = normalize_eval_result(result)
     return compute_reward(
         compiled=bool(normalized.get("compiles")),
