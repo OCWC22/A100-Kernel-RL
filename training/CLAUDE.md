@@ -21,7 +21,7 @@
 | **LR** | 2e-6 | 5e-6 | 3e-6 |
 | **Temperature** | 1.0 | 0.7 (generation) | 0.7 |
 | **G (generations)** | 2 | — | 2 |
-| **Max turns** | 3 | — | **3-5** (hackathon pilot; 20 is future target) |
+| **Max turns** | 3 | — | **3** (matches Dr. Kernel MAX_TURN=3; env var `KERNELFORGE_MAX_TURNS`) |
 | **Steps/Epochs** | 100 steps | 3 epochs | **50 steps** (hackathon pilot; 150 is future target) |
 | **Batch** | 1 × 4 grad_accum | 1 × 4 grad_accum | 1 × 4 grad_accum |
 | **Optimizer** | paged_adamw_8bit | — | paged_adamw_8bit |
@@ -121,7 +121,7 @@ Source-of-truth metadata feed:
 
 Derived training artifacts:
 - `doublegraph_sft.jsonl` — HF messages format for Stage 2 SFT (192 entries)
-- `combined_kernelforge.jsonl` — merged Ops-6K + doubleGraph curriculum pool (~6,192 entries)
+- `combined_kernelforge.jsonl` — merged Ops-6K + doubleGraph curriculum pool (224 entries: 192 doubleGraph + 32 ops_local)
 - Legacy files (`doublegraph_a100_kernels.jsonl`, `doublegraph_grpo_prompts.jsonl`) archived to `archive/datasets_legacy/`
 
 Categories: traversal, components, community, centrality, link_analysis, link_prediction, cores, tree.
@@ -152,6 +152,11 @@ Implements SkyDiscover's algorithms natively (no external dependency).
 | Real A100 patterns in SKILL.md | **DONE** | `skill_builder.py:_append_a100_patterns()` |
 | Topology-aware curriculum | **DONE** | `curriculum.py` Phase 2-3 (5 graph problems with graph_properties) |
 | Graph topology in RL observations | **DONE** | `kernel_forge_env.py`, `curriculum.py`, `multi_turn_rollout.py` |
+| Task pool sampling on reset() | **DONE** | `openenv_env/task_pool.py`, `kernel_forge_env.py` |
+| Anti-hack runtime checks (Dr. Kernel) | **DONE** | `openenv_env/anti_hack.py` (5 checks), wired into `eval_core.py` |
+| Benchmark runner (fast_p metrics) | **DONE** | `scripts/run_benchmark.py` |
+| Before/after comparison | **DONE** | `scripts/compare_results.py` |
+| Task pool builder (Ops-6K curation) | **DONE** | `tasks/build_task_pool.py` |
 | Evaluator bridge (cascade eval) | **DONE** | `skydiscover_integration/evaluator.py` |
 | AdaEvolve multi-island search | **DONE** | `skydiscover_integration/adaevolve.py` |
 | EvoX self-evolving strategies | **DONE** | `skydiscover_integration/evox_strategies.py` |

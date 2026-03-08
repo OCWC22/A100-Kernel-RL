@@ -94,7 +94,7 @@ The strongest defensible story today is:
 
 1. The environment path is real for a narrow live-evaluable slice.
 2. The evaluator path is real for WCC and a stateless Ops subset.
-3. The reward is real, but it is now continuous `log(speedup)` rather than discrete CUDA-Agent-style milestones.
+3. The reward is real: discrete milestones `{-1, 1, 2, 3}` per CUDA-Agent ablation (96.8% vs 60.4% faster rate over continuous).
 4. TRLOO is implemented.
 5. SFT-first is still the correct near-term posture.
 6. Search remains the strongest hedge and should stay complementary.
@@ -126,7 +126,7 @@ These parts are directionally correct and should remain:
 - `openenv_env/kernel_forge_env.py` implements a real OpenEnv `step/reset/state` contract.
 - `modal_app.py` has a real WCC path and a real stateless Ops extension-eval path.
 - `training/task_support.py` centralizes evaluator routing and payload construction.
-- `openenv_env/reward.py` computes continuous reward with correctness gating.
+- `openenv_env/reward.py` computes discrete milestone reward `{-1, 1, 2, 3}` with correctness gating.
 - `training/custom_grpo_trainer.py` implements the TRLOO `N/(N-1)` advantage scaling.
 - `openenv_env/skill_builder.py` injects hardware-aware SKILL context plus 7 doubleGraph A100 patterns.
 
@@ -173,7 +173,7 @@ Each row below is the section-level verdict for `docs/KERNELFORGE_FINAL_PRD.md`.
 | 2.1 Hackathon Deliverable | Revise | Partial | Components A, C, D, E are directionally right. | Component B overstates breadth; the live harness is narrow, not full generic Ops-6K coverage. |
 | 2.2 Long-Term Research Platform | Keep as future | Yes | Good to keep long-term ambition visible. | Tag more aggressively as future work. |
 | 3. Scope Boundaries | Keep | Yes | Strong and correct. | None. |
-| 4. Training Strategy | Keep with edits | Yes | Environment validation first, then SFT, then small-budget GRPO, then search is correct. | Reward subsection must acknowledge code currently uses continuous reward, not milestone reward. |
+| 4. Training Strategy | Keep with edits | Yes | Environment validation first, then SFT, then small-budget GRPO, then search is correct. | Reward uses discrete milestones `{-1,1,2,3}` per CUDA-Agent ablation. |
 | 5. Hackathon Configuration | Revise | Partial | The posture and abort conditions are right. | Model section conflicts with code default; “short outputs” and `G=2` are true for Stage 3, not across the whole training stack. |
 | 6. Realistic Compute Budget | Keep as estimate | Partial | Budget discipline is right. | Keep clearly labeled as estimate; do not imply measured runtime. |
 | 7. Claim Discipline | Keep | Yes | This is one of the best parts of the doc. | Apply it harder to later sections. |
@@ -193,7 +193,7 @@ These are the claims most likely to mislead another engineer if left unqualified
 | “Primary model is Qwen3-Coder-30B-A3B-Instruct” | Not true in code by default | `training/model_loader.py` still defaults to `Qwen/Qwen3-Coder-Next`. | Keep the architecture intent, not the current-code statement. | Either change code default or label the doc as target config. |
 | “Real evaluation harness (CUDA Agent pipeline)” | Partial | Real for WCC + stateless Ops subset only. | The harness itself is real and worth highlighting. | Narrow the wording to supported families. |
 | “6,000 operator tasks” as part of current evaluable system | Not defensible | Combined dataset is 224 rows here; only 19 are live-evaluable after filtering. | Keep Ops-6K as external data source, not current live-coverage claim. | Explicitly separate source dataset size from live harness coverage. |
-| “Continuous reward: log(speedup)” | True | Matches `openenv_env/reward.py`. | This is now the actual code truth. | Keep, but stop mixing it with discrete milestone claims elsewhere. |
+| “Discrete reward: {-1,1,2,3}” | True | Matches `openenv_env/reward.py:compute_reward()`. | This is the actual code truth per CUDA-Agent ablation. | Keep. |
 | “CUDA-Agent SKILL.md verbatim + doubleGraph pattern paste” | Partial | doubleGraph pattern injection is real; exact verbatim CUDA-Agent SKILL usage is not the main runtime truth. | Keep the broader “expert prompt prior” idea. | Phrase as “hardware-aware skill context with doubleGraph A100 priors.” |
 | “SkyDiscover hedge” | Directionally true | Search is integrated conceptually and has repo support. | Keep as hedge, not central proof of RL success. | Avoid implying it validates RL by itself. |
 | “doubleGraph baselines for reward calibration” | Partial | Valid only for the graph slice; not for generic Ops tasks. | Keep graph-slice calibration logic. | Make the graph-only scope explicit everywhere. |
@@ -255,7 +255,7 @@ This matrix covers the conversation-level directions, not just the two docs.
 | GEPA / DSPy prompt evolution | Correct as complement | Strong fit for evolving context/prompts without expensive weight updates. | Not yet integrated into one authoritative loop with the evaluator. | Keep as complementary to env + search. |
 | JEPA-style context optimization | Reasonable long-term direction | Useful framing for structured latent / prompt-context evolution. | Still high-level in this repo. | Keep as broader recipe, not hackathon proof. |
 | SkyDiscover / AdaEvolve / EvoX test-time search | Correct complement | Strong for hard cases and demo quality under budget. | Must use the same evaluator truth and not become a separate fake scoring loop. | Keep as hedge and inference-time compute layer. |
-| Rule-based dense process rewards | Worth exploring | Supported by process-supervision literature, and cheaper than learned PRMs. | Current code only has coarse continuous reward, not dense stepwise reward. | Good v1.5 improvement if time allows. |
+| Rule-based dense process rewards | Worth exploring | Supported by process-supervision literature, and cheaper than learned PRMs. | Current code uses discrete milestones, not dense stepwise reward. | Good v1.5 improvement if time allows. |
 | Contrastive fast-vs-slow training pairs | Worth exploring later | CUDA-L1-style ranking can be more sample-efficient than scalar reward alone. | Not wired into the current trainer. | Good post-hackathon experiment. |
 | “Same results as CUDA-Agent on one H100/B200” | Not a weekend claim | Current coverage and implementation do not justify it. | Too many unbuilt assumptions. | Keep only as future research target. |
 
@@ -315,3 +315,18 @@ The correct move is not to abandon the current direction. The correct move is to
 - keep search and GEPA-style prompt/context evolution as complements,
 - remove or quarantine speculative scale-up claims,
 - and hand the next engineer a doc set where current truth, stretch goals, and future research are not mixed together.
+
+## Environment Redesign Update (March 8, 2026)
+
+Since this audit was written, the following changes were shipped:
+
+1. **Task pool sampling** — `kernel_forge_env.py` now uses `TaskPool` instead of hardcoded WCC. Samples on `reset()`.
+2. **max_turns=3** — down from 200, matching Dr. Kernel MAX_TURN=3.
+3. **Anti-hack runtime checks** — 5 Dr. Kernel-inspired checks wired into `eval_core.py`.
+4. **Reference code in observations** — model sees PyTorch reference code + interface contract.
+5. **`_dispatch()` replaces `_modal()`** — backend-neutral.
+6. **Dependency inversion fixed** — `task_routing.py` re-exports from training/.
+7. **Benchmark tooling** — `run_benchmark.py` (fast_p metrics) + `compare_results.py` (before/after).
+8. **Task pool builder** — `build_task_pool.py` curates Ops-6K from HuggingFace.
+
+**The centralized single-source-of-truth for the environment design is now `docs/SYSTEM_TRUTH.md`.**

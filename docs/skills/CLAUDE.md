@@ -25,13 +25,21 @@
 These skill docs support the current KernelForge architecture:
 
 - custom lightweight OpenEnv wrapper for the environment surface
-- shared KernelForge task/reward/rollout logic
+- `TaskPool` sampling on `reset()` with task-specific reference code in observations
+- discrete milestone reward `{-1, 1, 2, 3}` with anti-hack checks (Dr. Kernel-inspired)
+- max_turns=3 (matching Dr. Kernel MAX_TURN)
 - KernelGYM-style backend beneath that wrapper
 - CoreWeave/Northflank as the primary eval path
 - Modal as fallback only
+- SkyDiscover integration as test-time search hedge (`skydiscover_integration/`)
+
+**Single-source-of-truth for environment design:** See `docs/SYSTEM_TRUTH.md`.
 
 External references:
 - [OpenEnv overview](https://meta-pytorch.github.io/OpenEnv/)
 - [TRL OpenEnv integration](https://huggingface.co/docs/trl/en/openenv)
 - [KernelGYM repo](https://github.com/hkust-nlp/KernelGYM)
 - [Dr. Kernel paper](https://arxiv.org/abs/2602.05885)
+- [SkyDiscover repo](https://github.com/skydiscover-ai/skydiscover)
+- [AdaEvolve paper](https://arxiv.org/abs/2602.20133)
+- [EvoX paper](https://arxiv.org/abs/2602.23413)

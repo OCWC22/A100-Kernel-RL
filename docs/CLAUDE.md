@@ -109,25 +109,43 @@ Operationally:
 - End-to-end Stage 3 GRPO pilot on the active backend
 - Throughput / stability measurements for the remote A100 service
 
-## Remaining Architectural Caveat
+## Environment Redesign (March 8, 2026)
 
-The codebase is now **largely consistent** with OpenEnv as the public wrapper over a KernelGYM-style execution backend, but one cleanup remains:
+Recent changes to the environment layer:
 
-- `KernelForgeEnv` still imports payload/result helpers from `training/task_support.py`
+| Change | File | What |
+|--------|------|------|
+| Task pool sampling on `reset()` | `openenv_env/task_pool.py` | Replace hardcoded WCC with pool sampling (Ops-6K + doubleGraph) |
+| `max_turns=3` | `openenv_env/kernel_forge_env.py` | Down from 200, matches Dr. Kernel MAX_TURN=3 |
+| Anti-hack runtime checks | `openenv_env/anti_hack.py` | 5 Dr. Kernel-inspired checks wired into eval_core.py |
+| Reference code in observations | `openenv_env/kernel_forge_env.py` | Task prompt + PyTorch reference code + interface contract |
+| `_dispatch()` replaces `_modal()` | `openenv_env/kernel_forge_env.py` | Backend-neutral dispatch |
+| Dependency inversion fix | `openenv_env/task_routing.py` | Re-exports from training/ so env doesn't import training |
+| Benchmark tooling | `scripts/run_benchmark.py`, `scripts/compare_results.py` | KernelBench-compatible fast_p metrics |
+| Task pool builder | `tasks/build_task_pool.py` | Curates Ops-6K from HuggingFace → stateless evaluable subset |
 
-That means the backend seam exists and works, but the environment layer still depends on a training namespace. The next cleanup should move those helper functions into a neutral runtime package.
+**Single-source-of-truth for environment design:** See `docs/SYSTEM_TRUTH.md`.
 
 ## Quick File Pointers
 
+- **Single source of truth**: `docs/SYSTEM_TRUTH.md`
 - OpenEnv server: `openenv_env/server/app.py`
 - OpenEnv client: `openenv_env/client.py`
 - Environment: `openenv_env/kernel_forge_env.py`
+- Task pool: `openenv_env/task_pool.py`
+- Anti-hack: `openenv_env/anti_hack.py`
 - Backend switch: `openenv_env/eval_backend.py`
 - Shared eval core: `eval_service/eval_core.py`
 - CoreWeave/Northflank service: `eval_service/app.py`
 - Training launcher: `training/grpo_train.py`
 - Rollout loop: `training/multi_turn_rollout.py`
 - Task routing + reward contract: `training/task_support.py`
+- Task routing re-exports: `openenv_env/task_routing.py`
+- Benchmark runner: `scripts/run_benchmark.py`
+- Before/after comparison: `scripts/compare_results.py`
+- Task pool builder: `tasks/build_task_pool.py`
+- SkyDiscover evaluator: `skydiscover_integration/evaluator.py`
+- SkyDiscover search: `skydiscover_integration/adaevolve.py`
 
 <claude-mem-context>
 

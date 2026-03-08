@@ -46,19 +46,37 @@ class KernelForgeObservation(Observation):
 
 ### Constructor
 ```python
-KernelForgeEnv()
+KernelForgeEnv(task_pool: TaskPool | None = None)
 ```
+- `self.task_pool` — loaded from `TaskPool.load()` if not provided (fallback: combined_kernelforge.jsonl → builtin ELU task)
 - `self.target_gpu` from env `KERNELFORGE_TARGET_GPU` (default "a100")
-- `self.max_turns = 200`
-- remote evaluation dispatch selected by `KERNELFORGE_EVAL_BACKEND` via `openenv_env/eval_backend.py`
+- `self.max_turns = int(os.getenv("KERNELFORGE_MAX_TURNS", "3"))` — matches Dr. Kernel MAX_TURN=3
+- remote evaluation dispatch via `openenv_env/eval_backend.py` using `_dispatch()` method
 
 ### Contract
 ```python
-def reset(self, seed=None, episode_id=None, **kwargs) -> KernelForgeObservation
+def reset(self, seed=None, episode_id=None, task_id=None, **kwargs) -> KernelForgeObservation
 def step(self, action: KernelForgeAction, timeout_s=None, **kwargs) -> KernelForgeObservation
 ```
 
-`step()` builds a task-specific payload via `training/task_support.py` and dispatches through `openenv_env/eval_backend.py` to the active backend. Default path: CoreWeave/Northflank HTTP service. Fallback path: Modal wrapper.
+`reset()` samples a task from `TaskPool` (or uses specific `task_id`), builds observation with SKILL.md + reference code + interface contract.
+
+`step()` builds a task-specific payload via `training/task_support.py` and dispatches through `_dispatch()` → `openenv_env/eval_backend.py` to the active backend. Default path: CoreWeave/Northflank HTTP service. Fallback path: Modal wrapper.
+
+### Task Pool (`task_pool.py`)
+
+```python
+class TaskPool:
+    @classmethod
+    def load(cls, pool_path=None) -> TaskPool   # Fallback chain: pool_v0.jsonl → combined → builtin
+    def sample(self, task_id=None, seed=None, backend=None) -> dict
+    def get_cached_baselines(self, task_id) -> dict | None
+    def cache_baselines(self, task_id, baselines) -> None
+```
+
+### Task Routing (`task_routing.py`)
+
+Re-exports from `training/task_support.py` to fix dependency inversion (env should not import training). Exports: `build_modal_payload`, `normalize_eval_result`, `normalize_task_row`, `task_interface_contract`.
 
 ## Reward (`reward.py`)
 
@@ -87,15 +105,29 @@ Nsight metrics (occupancy, mem_coalescing, warp_efficiency) are accepted as opti
 
 ## Anti-Hack (`anti_hack.py`)
 
-### `extract_cu_flags(cuda_code) -> list[str]`
+### Static Checks
+
+#### `extract_cu_flags(cuda_code) -> list[str]`
 Extracts from `// CU_FLAGS: ...` comment lines.
 
 **Allowed flags**: `--use_fast_math`, `--extra-device-vectorization`, `--rdc=true`, `--maxrregcount=*`
 
-### `scan_forbidden_symbols(so_path) -> str | None`
+#### `scan_forbidden_symbols(so_path) -> str | None`
 Uses `nm -D` to scan compiled .so. Returns failure reason or None.
 
 **Forbidden symbols**: `torch`, `at::Tensor`, `c10::`, `torch::autograd`, `triton`, `torch.compile`, `torch.nn.functional`
+
+### Runtime Anti-Hack Checks (Dr. Kernel-inspired)
+
+These are wired into `eval_service/eval_core.py:evaluate_ops6k_kernel_impl()` lines 732-773.
+
+| Function | What It Catches |
+|----------|----------------|
+| `check_shapes_match(candidate, reference)` | Output tensor count/shape mismatch |
+| `check_output_not_constant(output1, output2)` | Decoy kernel returning hardcoded values regardless of input |
+| `check_not_passthrough(output, inputs)` | Kernel returning input unchanged (identity function) |
+| `check_not_noop(runtime_ms)` | Suspiciously fast kernel (< 1μs) — skips computation |
+| `run_anti_hack_suite(...)` | Orchestrates all checks in sequence |
 
 ## GPU Registry (`gpu_registry.py`)
 
