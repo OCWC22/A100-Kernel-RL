@@ -11,7 +11,7 @@ Multi-seed evaluation with 95% CI (t-distribution).
 ### `compare_stages()`
 Evaluates Base → Stage 1 → Stage 2 → Stage 3 progression.
 
-Constants: `MODAL_APP_NAME="kernelforge-a100"`, `TARGET_GPU="A100"`, `EVAL_PROBLEMS=50`
+Constants: `EVAL_BACKEND` (from `KERNELFORGE_EVAL_BACKEND`, default "coreweave"), `TARGET_GPU="A100"`, `EVAL_PROBLEMS=50`
 
 ## compare_stages.py (86 lines)
 
@@ -88,36 +88,31 @@ NCU sections profiled: ComputeWorkloadAnalysis, MemoryWorkloadAnalysis, LaunchSt
 
 CLI args: `--kernel` (required), `--baseline`, `--ncu`, `--warmup` (100), `--runs` (50), `--graph-size` (10000)
 
-## modal_app.py (project root)
+## Eval Backend
 
-### Modal Functions (GPU=A100, app="kernelforge-a100")
+### Primary service path
 
-| Function | Timeout | Description | Status |
-|----------|---------|-------------|--------|
-| `evaluate_kernel(payload)` | 120s | Compile + PAC verify + benchmark (WCC) | Existing |
-| `evaluate_ops6k_kernel(payload)` | 120s | Compile + verify + benchmark (Ops-6K) | **NEW** |
-| `profile_baselines()` | 300s | Original + doublegraph timing | Existing |
-| `test_h100_features()` | 60s | GPU feature detection | Existing |
-| `evaluate_kernels_batch(payloads)` | 600s | Batch evaluation | Existing |
+| Component | Role |
+|-----------|------|
+| `eval_service/eval_core.py` | Shared pure compile / verify / benchmark implementation |
+| `eval_service/app.py` | Northflank/CoreWeave FastAPI service exposing the evaluator contract |
+| `openenv_env/eval_backend.py` | Dispatch switch: CoreWeave HTTP default, Modal fallback |
+| `modal_app.py` | Fallback wrapper around `eval_service.eval_core` |
 
-`evaluate_ops6k_kernel` payload: `cuda_code`, `task_code` (reference PyTorch model), `warmup_iters=10`, `benchmark_runs=10`
+Returns: `compiles`, `correct`, `speedup_vs_orig`, `speedup_vs_dg`, `runtime_ms`, `runtime_stats`, `verifier_msg`, `error`
 
-Returns: `compiles`, `correct`, `speedup_vs_orig`, `speedup_vs_dg`, `runtime_ms`, `error`
+## Training launch posture
 
-## modal_train.py (project root) — NEW
-
-Modal training app. Runs 3-stage pipeline on H100 ($3.95/hr, 80GB).
-- `modal run modal_train.py --stage 0` — smoke test
-- `modal run modal_train.py --stage 1 --max-steps 10` — Stage 1 warmup
-- `modal run modal_train.py --stage 3` — Stage 3 GRPO demo
+- Preferred hackathon path: `training/grpo_train.py` with `KERNELFORGE_EVAL_BACKEND=coreweave` and `KERNELFORGE_EVAL_URL` set to the Northflank service URL.
+- Fallback path: Modal launchers preserved for later / recovery scenarios.
 
 ## Eval Strategy
 
 | Component | Status | Location |
 |-----------|--------|----------|
 | Local nvcc compile fast-path | **DONE** | `training/multi_turn_rollout.py:_local_compile_check()` |
-| Modal eval (WCC) | **DONE** | `modal_app.py:evaluate_kernel()` |
-| Modal eval (Ops-6K) | **DONE** | `modal_app.py:evaluate_ops6k_kernel()` |
+| Remote eval (WCC) | **DONE in code** | `eval_service/eval_core.py:evaluate_kernel_impl()` via `eval_backend` |
+| Remote eval (Ops-6K) | **DONE in code** | `eval_service/eval_core.py:evaluate_ops6k_kernel_impl()` via `eval_backend` |
 | Nsight bonus in reward | **DONE** | `openenv_env/reward.py:compute_reward()` |
 | CPPO cheap_cuda_score pre-filter | NOT YET | GRPO-11 line 1762 |
 | Full hybrid turn-escalation | NOT YET | GRPO-10 line 1355 |

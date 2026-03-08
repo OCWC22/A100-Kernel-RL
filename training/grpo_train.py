@@ -17,7 +17,7 @@ if __package__ in {None, ""}:
 from training.dataset_loader import load_training_dataset
 from training.task_support import summarize_tasks
 
-REQUIRED_PACKAGES = ("trl", "transformers", "torch", "modal")
+REQUIRED_PACKAGES = ("trl", "transformers", "torch")
 if sys.platform.startswith("linux"):
     REQUIRED_PACKAGES += ("peft",)
 
@@ -60,7 +60,7 @@ def preflight() -> None:
         missing_str = ", ".join(missing)
         raise RuntimeError(
             "Missing required training dependencies: "
-            f"{missing_str}. Install them with `uv sync --extra train --extra modal --extra openenv`."
+            f"{missing_str}. Install them with `uv sync --extra train --extra openenv` for the primary CoreWeave/Northflank path, and add `--extra modal` only if you need the Modal fallback tooling."
         )
 
     missing_assets = _missing_assets()
@@ -71,14 +71,28 @@ def preflight() -> None:
             f"{missing_str}. Ensure the DoubleGraph manifest and SFT priors are present before launching RL."
         )
 
-    try:
-        import modal
-        if not getattr(modal.config, "token_id", None):
-            print("WARNING: Modal authentication not configured. "
-                  "Run `modal token new` or set MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env vars. "
-                  "Training will fail at evaluation time without Modal auth.")
-    except ImportError:
-        print("WARNING: modal package not installed. Eval dispatch will fail.")
+    from openenv_env.eval_backend import EVAL_BACKEND, EVAL_URL
+    if EVAL_BACKEND == "modal":
+        try:
+            import modal
+            if not getattr(modal.config, "token_id", None):
+                print("WARNING: Modal authentication not configured. "
+                      "Run `modal token new` or set MODAL_TOKEN_ID/MODAL_TOKEN_SECRET env vars. "
+                      "Training will fail at evaluation time without Modal auth.")
+        except ImportError:
+            print("WARNING: modal package not installed but KERNELFORGE_EVAL_BACKEND=modal.")
+    elif EVAL_BACKEND == "coreweave":
+        if not EVAL_URL:
+            print("WARNING: KERNELFORGE_EVAL_URL not set. "
+                  "Set it to the Northflank eval service URL for CoreWeave dispatch.")
+        else:
+            try:
+                import httpx
+                resp = httpx.get(f"{EVAL_URL.rstrip('/')}/health", timeout=10.0)
+                resp.raise_for_status()
+                print(f"Eval backend: CoreWeave ({EVAL_URL}) — healthy")
+            except Exception as exc:
+                print(f"WARNING: CoreWeave eval service not reachable at {EVAL_URL}: {exc}")
 
     summary = _dataset_summary()
     print("Dataset summary:")

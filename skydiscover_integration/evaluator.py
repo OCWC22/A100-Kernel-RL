@@ -1,11 +1,11 @@
-"""SkyDiscover evaluator bridge — connects SkyDiscover's evolutionary search to Modal A100 eval.
+"""SkyDiscover evaluator bridge — connects SkyDiscover's evolutionary search to the configured remote A100 eval backend.
 
 SkyDiscover expects: evaluate(program_path) -> {"combined_score": float, "artifacts": {...}}
-We bridge to: Modal evaluate_kernel() / evaluate_ops6k_kernel() on A100.
+We bridge to: the shared KernelForge evaluator contract on A100.
 
 Supports cascade evaluation:
   Stage 1 (fast): local nvcc compile check only — filters ~50% of candidates
-  Stage 2 (slow): full A100 benchmark via Modal — accurate timing + correctness
+  Stage 2 (slow): full remote A100 benchmark — accurate timing + correctness
 """
 from __future__ import annotations
 
@@ -15,9 +15,8 @@ import tempfile
 from dataclasses import dataclass, field
 from typing import Any
 
-import modal
-
 from openenv_env.anti_hack import extract_cu_flags, scan_forbidden_symbols
+from openenv_env.eval_backend import dispatch_eval
 from openenv_env.reward import compute_reward, validate_eval_result
 
 
@@ -31,7 +30,7 @@ class EvaluationResult:
 
 
 class KernelForgeEvaluator:
-    """Evaluator bridge from SkyDiscover to Modal A100 evaluation pipeline.
+    """Evaluator bridge from SkyDiscover to the KernelForge remote A100 evaluation pipeline.
 
     Usage:
         evaluator = KernelForgeEvaluator()
@@ -40,13 +39,11 @@ class KernelForgeEvaluator:
 
     def __init__(
         self,
-        modal_app_name: str = "kernelforge-a100",
         target_arch: str = "sm_80",
         stage1_threshold: float = 0.0,
         task_code: str | None = None,
         eval_mode: str = "wcc",
     ):
-        self.modal_app_name = modal_app_name
         self.target_arch = target_arch
         self.stage1_threshold = stage1_threshold
         self.task_code = task_code
@@ -55,7 +52,7 @@ class KernelForgeEvaluator:
     def evaluate_stage1(self, cuda_code: str) -> EvaluationResult:
         """Fast local compile check — no GPU needed.
 
-        Filters obviously broken candidates before expensive Modal calls.
+        Filters obviously broken candidates before expensive remote evaluation calls.
         Returns combined_score=0 for compile failures, 0.1 for compile success.
         """
         result = EvaluationResult()
@@ -104,7 +101,7 @@ class KernelForgeEvaluator:
         return result
 
     def evaluate_stage2(self, cuda_code: str) -> EvaluationResult:
-        """Full A100 benchmark via Modal — accurate timing + correctness.
+        """Full A100 benchmark via the configured backend — accurate timing + correctness.
 
         Only call this for candidates that passed stage1.
         """
@@ -112,9 +109,7 @@ class KernelForgeEvaluator:
 
         try:
             if self.eval_mode == "ops6k" and self.task_code:
-                fn = modal.Function.from_name(
-                    self.modal_app_name, "evaluate_ops6k_kernel"
-                )
+                fn_name = "evaluate_ops6k_kernel"
                 payload = {
                     "cuda_code": cuda_code,
                     "task_code": self.task_code,
@@ -122,9 +117,7 @@ class KernelForgeEvaluator:
                     "benchmark_runs": 10,
                 }
             else:
-                fn = modal.Function.from_name(
-                    self.modal_app_name, "evaluate_kernel"
-                )
+                fn_name = "evaluate_kernel"
                 payload = {
                     "cuda_code": cuda_code,
                     "verify_graphs": 5,
@@ -132,7 +125,7 @@ class KernelForgeEvaluator:
                     "benchmark_runs": 30,
                 }
 
-            modal_result = fn.remote(payload)
+            modal_result = dispatch_eval(fn_name, payload)
             modal_result = validate_eval_result(modal_result)
 
             compiled = modal_result.get("compiles", False)
@@ -163,7 +156,7 @@ class KernelForgeEvaluator:
             }
 
         except Exception as e:
-            result.error = f"Modal evaluation failed: {str(e)[:500]}"
+            result.error = f"Eval dispatch failed: {str(e)[:500]}"
             result.combined_score = -1.0
 
         return result

@@ -19,7 +19,7 @@ from training.multi_turn_rollout import extract_cuda_code
 from training.run_metadata import utc_timestamp_rfc3339
 from training.task_support import (
     build_generation_prompt,
-    evaluate_code_on_modal,
+    evaluate_code_remote,
     normalize_task_row,
 )
 from training.curriculum import format_topology_context
@@ -87,11 +87,7 @@ class TrajectoryCollector:
             if not code:
                 raise RuntimeError("Model response did not contain CUDA/C++ code")
 
-            result = evaluate_code_on_modal(
-                code,
-                task,
-                modal_app_name=self.modal_app_name,
-            )
+            result = evaluate_code_remote(code, task)
 
             return {
                 "id": trajectory_id,

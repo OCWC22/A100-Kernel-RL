@@ -1,11 +1,11 @@
 # KernelForge: Hackathon PRD
 ## Single Source of Truth for the OpenEnv / Cerebral Valley / PyTorch / Unsloth Hackathon
 **Hackathon:** OpenEnv Hackathon SF — March 7–8, 2026 (SHACK15, San Francisco)
-**Training GPU:** NVIDIA H200 via Modal ($4.54/hr, current `modal_train.py` default) with H100 as a fallback path | **Eval GPU:** NVIDIA A100 80GB via Modal ($2.50/hr) | **Target Kernels:** NVIDIA A100 (`sm_80`)
+**Runtime target:** Northflank orchestrating GPU workloads on CoreWeave-backed infrastructure (**active migration target; legacy Modal launchers remain in the repo during transition**) | **Training GPU target:** H200-class with H100 fallback depending on the provisioned Northflank/CoreWeave node pool | **Eval GPU target:** A100 80GB on the same backend | **Target Kernels:** NVIDIA A100 (`sm_80`)
 **Primary Model:** Qwen3-Coder-30B-A3B-Instruct (30.5B total, 3.3B active, 128 experts / 8 active, 256K context)
 **Fallback Model:** Qwen3.5-35B-A3B
-**Last Updated:** March 6, 2026
-**Live infra references:** [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200), [Modal GPU guide](https://modal.com/docs/guide/gpu)
+**Last Updated:** March 7, 2026
+**Live infra references:** [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank), [Deploy GPUs in your own cloud](https://northflank.com/docs/v1/application/gpu-workloads/deploy-gpus-in-your-own-cloud), [Configure and optimise workloads for GPUs](https://northflank.com/docs/v1/application/gpu-workloads/configure-and-optimise-workloads-for-gpus), [CoreWeave volume management](https://v2.docs.coreweave.com/docs/products/storage/distributed-file-storage/manage-volumes)
 
 ## Executive Summary
 
@@ -34,8 +34,8 @@ The long-term objective remains the same: a one-GPU, data-efficient CUDA kernel 
 Full CUDA-Agent replication is **not** the hackathon target. The hackathon target is a smaller, credible pilot:
 - A100-targeted kernels with execution-based correctness and timing-based reward
 - structured priors from DoubleGraph, `skills.md`, and curated CUDA-Agent-style tasks
-- H200 for model generation and gradient updates via Modal
-- A100 80GB for all performance measurement via Modal
+- H200-class GPU for model generation and gradient updates via Northflank + CoreWeave, with H100 fallback if that is what the provisioned node pool exposes
+- A100 80GB for all performance measurement via the same Northflank + CoreWeave backend
 - SFT warmup followed by a limited-step GRPO pilot on the live-evaluable consolidated subset
 - **no `vLLM` in the hackathon runtime path**; use the standard TRL / Transformers generation path on a single H200 for the fastest reliable bring-up, and reserve `vLLM` for later scale-up once separate inference capacity or tuned colocation is justified. Sources: [TRL GRPO docs](https://huggingface.co/docs/trl/grpo_trainer), [TRL vLLM integration](https://huggingface.co/docs/trl/en/vllm_integration)
 
@@ -61,8 +61,8 @@ Those are future targets, not current facts.
 | Decision | Choice | Why |
 |----------|--------|-----|
 | Target kernels | **A100 `sm_80`** | The optimization target is A100 behavior, so performance reward must be measured on A100 rather than on a different architecture. |
-| Training GPU | **H200** ($4.54/hr via Modal) | For the hackathon, H200 is the active training default in code and provides enough headroom for Qwen3-Coder-30B-A3B-Instruct plus LoRA and rollout overhead on one GPU. Sources: [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200), [Modal GPU guide](https://modal.com/docs/guide/gpu). |
-| Eval GPU | **A100 80GB** via Modal ($2.50/hr) | **Hard requirement:** any reward involving speedup/runtime MUST execute on A100. H200-only eval is limited to bring-up, compilation, and local syntax checks. Sources: [Modal pricing](https://modal.com/pricing), [Modal GPU guide](https://modal.com/docs/guide/gpu). |
+| Training GPU | **H200-class via Northflank + CoreWeave**, with H100 fallback | For the hackathon, the active infra target is a Northflank-managed GPU workload on CoreWeave-backed infrastructure. H200-class remains the preferred bring-up target because it preserves headroom for Qwen3-Coder-30B-A3B-Instruct plus rollout overhead, while H100 remains the practical fallback if that is what the provisioned node pool exposes. Sources: [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank). |
+| Eval GPU | **A100 80GB via Northflank + CoreWeave** | **Hard requirement:** any reward involving speedup/runtime MUST execute on A100. Training-GPU eval is limited to bring-up, compilation, and local syntax checks. Sources: [Deploy GPUs in your own cloud](https://northflank.com/docs/v1/application/gpu-workloads/deploy-gpus-in-your-own-cloud), [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank). |
 | Primary model | **Qwen3-Coder-30B-A3B-Instruct** | Coding-agent model with 30.5B total / 3.3B active params, 48 layers, 128 experts / 8 active, 256K native context. Strong coding baseline without 80B-scale deployment burden. |
 | Fallback model | **Qwen3.5-35B-A3B** | If primary model underperforms or has compatibility issues. |
 | SkyDiscover LLM | GLM-5 via API ($1/M input) | Frontier 744B model for kernel evolution. ~$2-8/run. |
@@ -78,11 +78,11 @@ Those are future targets, not current facts.
 
 Qwen3-Coder-30B-A3B-Instruct is an MoE model with 30.5B total parameters but only 3.3B active. In FP8, model weights are ~16-18GB. Training overhead (LoRA + optimizer + KV cache + activations) adds ~10-20GB depending on context length and G.
 
-| GPU | VRAM | Model (FP8) | Free for Training | $/hr (Modal) | Verdict |
-|-----|------|-------------|-------------------|-------------|---------|
-| **H200** | 141 GB HBM3e | ~16-18 GB | **~123 GB** | **$4.54** | **Primary — active Modal training default with ample headroom for single-GPU hackathon bring-up** |
-| B200 | 192 GB HBM3e | ~16-18 GB | ~174 GB | $6.25 | Overkill for 30B model; reserved for future 80B scale-up |
-| A100 80GB | 80 GB HBM2e | ~16-18 GB | ~60 GB | $2.50 | **Eval only** — target architecture for kernel performance |
+| GPU | VRAM | Model (FP8) | Free for Training | Provider path | Verdict |
+|-----|------|-------------|-------------------|---------------|---------|
+| **H200** | 141 GB HBM3e | ~16-18 GB | **~123 GB** | Northflank-managed workload on CoreWeave-backed GPU nodes | **Primary target** if the provisioned node pool exposes H200-class capacity |
+| B200 | 192 GB HBM3e | ~16-18 GB | ~174 GB | Future CoreWeave scale-up path | Overkill for 30B model; reserved for future 80B scale-up |
+| A100 80GB | 80 GB HBM2e | ~16-18 GB | ~60 GB | Northflank + CoreWeave eval workload | **Eval only** — target architecture for kernel performance |
 
 **H200 training overhead budget (~123GB free):**
 
@@ -133,7 +133,7 @@ Three priors make the small-budget RL story plausible:
 - **`skills.md` prior:** CUDA rules and architecture heuristics guide generation toward known-good implementation patterns instead of spending rollouts rediscovering basics. Sources: [CUDA-Agent paper](https://arxiv.org/abs/2602.24286), [CUDA-Agent project page](https://cuda-agent.github.io/).
 - **Curated task prior:** CUDA-Agent-style operator tasks and harvested kernels give us a better starting distribution than cold-start RL. Source: [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K).
 
-> **Training vs Eval GPU Split (First Principles):** We train on **H200** ($4.54/hr, 141GB) for model weights, generation, and gradient updates. **All performance reward must execute on A100** (via Modal). Cross-compiling `nvcc -arch=sm_80` on H200 is fine for syntax checking, but measuring runtime/occupancy/memory behavior on Hopper would optimize for the wrong hardware. Training GPU eval is limited to: compile check, symbol scan, `ptxas` static analysis. Any reward involving speedup, correctness verification, or Nsight profiling requires A100 execution.
+> **Training vs Eval GPU Split (First Principles):** We train on an **H200-class GPU** for model weights, generation, and gradient updates, with **H100 fallback** if that is what the Northflank/CoreWeave node pool exposes. **All performance reward must execute on A100** through the active remote backend. Cross-compiling `nvcc -arch=sm_80` on the training GPU is fine for syntax checking, but measuring runtime/occupancy/memory behavior on Hopper would optimize for the wrong hardware. Training-GPU eval is limited to: compile check, symbol scan, `ptxas` static analysis. Any reward involving speedup, correctness verification, or Nsight profiling requires A100 execution. Sources: [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank).
 
 **Component A — OpenEnv-compatible kernel environment**
 - `step() / reset() / state()` contract
@@ -154,7 +154,7 @@ Three priors make the small-budget RL story plausible:
 - Short GRPO pilot after SFT (G=2, discrete milestone rewards {-1, 1, 2, 3}, limited steps) to validate sample-efficient learning inside the structured search space
 - TRLOO N/(N-1) correction via `TRLOOGRPOTrainer`
 - CUDA-Agent SKILL.md verbatim + doubleGraph pattern paste as prompt context
-- Hybrid eval: H200 local nvcc compile check for fast-fail, Modal A100 for all performance + correctness reward
+- Hybrid eval: local nvcc compile check for fast-fail on the training GPU, remote A100 for all performance + correctness reward through the active backend adapter (Northflank + CoreWeave target; legacy Modal during transition)
 
 **Component D — Optional search hedge (SkyDiscover / evolutionary search)**
 - AdaEvolve + EvoX for kernel evolution via GLM-5 API
@@ -399,19 +399,18 @@ This section is the **live status tracker** for what is actually implemented in 
 | Authoritative evaluation wrappers | **Done** | `evaluation/sandbox.py`, `evaluation/compiler.py`, `evaluation/verifier.py`, and `evaluation/profiler.py` now exist as the repo’s importable evaluation primitives, matching the intended split of sandbox / compile / verify / profile responsibilities. |
 | Run metadata timestamps | **Done** | `training/run_metadata.py` now emits RFC 3339 / ISO 8601 UTC timestamps, and rollout / RFT paths use those timestamps for machine-readable run metadata. Standard reference: [RFC 3339](https://www.rfc-editor.org/info/rfc3339). |
 | OpenEnv-compatible environment contract | **Done** | `openenv_env/` is fully implemented: `kernel_forge_env.py` (reset/step), `models.py` (Pydantic Action/Observation), `client.py` (EnvClient), `server/app.py` (FastAPI on port 8000), `openenv.yaml` (spec v1). OpenEnv interface reference: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv repo](https://github.com/meta-pytorch/OpenEnv). |
-| Reward loop (compile → correctness → timing → reward) | **Partial** | The code routes tasks to Modal-backed evaluators and computes canonical rewards, but end-to-end correctness/timing readiness still depends on live Modal auth plus remote A100 execution. |
+| Reward loop (compile → correctness → timing → reward) | **Done in code, needs live backend verification** | The code now routes evaluation through `openenv_env/eval_backend.py`, with `eval_service/eval_core.py` as the shared pure evaluation core, `eval_service/app.py` as the Northflank/CoreWeave HTTP service, and `modal_app.py` retained as a fallback wrapper. End-to-end correctness/timing still requires a live remote A100 backend, but the reward-bearing path is no longer Modal-only. |
 | DoubleGraph prior integration | **Done for prompt/data priors** | The repo already ships a DoubleGraph manifest, topology-aware curriculum tasks, dynamic `skills.md` augmentation, and Stage 2 SFT priors derived from DoubleGraph. Runtime doubleGraph wheel install remains optional. Source: [doubleGraph repo](https://github.com/double-ai/doubleGraph). |
 | `skills.md` integration | **Done** | Skill context is injected into rollout generation and Stage 2 trajectory collection; dynamic Hopper/H200 skill generation is now supported. |
 | Curated dataset integration | **Done** | `datasets/build_combined_dataset.py` merges DoubleGraph manifest rows with CUDA-Agent-style operator tasks; `training/dataset_loader.py` routes Stage 1/2/3 data appropriately. Source: [CUDA-Agent-Ops-6K dataset](https://huggingface.co/datasets/BytedTsinghua-SIA/CUDA-Agent-Ops-6K). |
 | Stage 1 warmup entrypoint | **Done, but needs real run** | Startup/import issues were fixed, fallback dataset handling is robust, and the trainer now uses the custom rollout path with TRL/OpenEnv-compatible generation flow. TRL OpenEnv reference: [TRL OpenEnv docs](https://huggingface.co/docs/trl/main/en/openenv). |
 | Stage 2 RFT / SFT | **Done, but needs real run** | Stage 2 now merges filtered trajectories with DoubleGraph SFT priors before training. |
 | Stage 3 GRPO pilot | **Done, but needs real run** | Startup/import issues were fixed; curriculum dataset creation works with both HF-style and fallback datasets. For the hackathon path, `vLLM` is intentionally deferred and the runtime is streamlined around the standard TRL generation path on a single H200. Sources: [TRL GRPO docs](https://huggingface.co/docs/trl/grpo_trainer), [TRL vLLM integration](https://huggingface.co/docs/trl/en/vllm_integration). |
-| H200 training launcher | **Done in code** | `modal_train.py` now defaults to `KERNELFORGE_TRAIN_GPU=H200`, which matches Modal’s supported `gpu="H200"` configuration and current H200 pricing / availability. Sources: [Modal GPU guide](https://modal.com/docs/guide/gpu), [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200). |
-| Modal eval app selection | **Done in code** | Both the smoke test path and `KernelForgeEnv` now resolve the eval app through `KERNELFORGE_MODAL_APP` instead of a hardcoded name, reducing deployment mismatch risk. |
-| Modal training image / remote asset wiring | **Done** | The training image includes `openenv-core` and ships the dataset / manifest assets needed by the loader on remote runs. |
-| Smoke-test validity | **Done in code, needs remote verification** | The smoke test now uses a minimal PyTorch extension-style payload for `evaluate_ops6k_kernel`, and generation is skipped cleanly if model loading fails. |
-| Preflight / fail-fast validation | **Done** | `training/grpo_train.py --preflight-only` validates dependencies and required assets before launch, and the local preflight now passes. |
-| Modal authentication + deployed eval app | **Blocked externally** | Real smoke / GRPO execution still require Modal credentials plus deployment of `modal_app.py` before `modal_train.py --stage 0`, because the training smoke path resolves `modal.Function.from_name(...)`. Modal behavior reference: [modal deploy docs](https://modal.com/docs/reference/cli/deploy), [modal run docs](https://modal.com/docs/reference/cli/run), [Apps guide](https://modal.com/docs/guide/apps). |
+| Provider-neutral eval adapter | **Done in code** | `openenv_env/eval_backend.py` now selects `coreweave` by default and routes to `KERNELFORGE_EVAL_URL` over HTTP, with `modal` preserved as a fallback. |
+| Shared pure evaluation core | **Done in code** | `eval_service/eval_core.py` now contains the compile / verify / benchmark logic with zero Modal dependency, and both the FastAPI service and Modal wrapper import it. |
+| Northflank/CoreWeave eval service | **Done in code, needs live deployment verification** | `eval_service/app.py` exposes the same evaluation contract as the legacy Modal app over FastAPI, and `eval_service/Dockerfile` packages it for GPU deployment on Northflank/CoreWeave. |
+| Preflight / fail-fast validation | **Done** | `training/grpo_train.py --preflight-only` now validates dependencies/assets and checks either CoreWeave service health (`/health`) or Modal auth depending on `KERNELFORGE_EVAL_BACKEND`. |
+| Modal fallback path | **Done in code** | `modal_app.py` is now a thin fallback wrapper around `eval_service.eval_core`, rather than the primary implementation surface. |
 
 ### 8.5.2 What is done right now
 
@@ -423,124 +422,210 @@ This section is the **live status tracker** for what is actually implemented in 
 - **[done]** `openenv_env/skill_builder.py` generates Hopper/H200 skill context, while A100 retains the DoubleGraph-specific appended expert patterns.
 - **[done]** `training/rft_filter.py` now uses the same `skills.md` + topology-aware prompt construction style as the RL rollout path.
 - **[done]** `training/stage2_rft.py` now merges DoubleGraph SFT prior rows with filtered trajectories instead of training only on collected rollouts.
-- **[done]** `modal_train.py` now ships dataset assets and the DoubleGraph manifest into the Modal training image.
-- **[done]** `modal_train.py` now resolves the eval app via `KERNELFORGE_MODAL_APP` and its smoke test uses a valid extension-style payload for `evaluate_ops6k_kernel`.
-- **[done]** `openenv_env/kernel_forge_env.py` now resolves the eval app via `KERNELFORGE_MODAL_APP` instead of a hardcoded app name.
-- **[done]** `pyproject.toml` now includes `evaluation*` in package discovery so editable / built installs match the source tree.
-- **[done]** `training/grpo_train.py` now performs asset-aware preflight checks before launch.
+- **[done]** `eval_service/eval_core.py` now contains the shared compile / verify / benchmark implementation with zero Modal dependency.
+- **[done]** `eval_service/app.py` now exposes the evaluator contract as a FastAPI service for Northflank/CoreWeave deployment.
+- **[done]** `openenv_env/eval_backend.py` now provides the backend switch: CoreWeave HTTP by default, Modal fallback when explicitly requested.
+- **[done]** `training/task_support.py` now dispatches via `evaluate_code_remote()` and preserves `evaluate_code_on_modal()` only as a backward-compatible alias.
+- **[done]** `training/multi_turn_rollout.py`, `openenv_env/kernel_forge_env.py`, and `skydiscover_integration/evaluator.py` now route remote evaluation through the shared backend seam.
+- **[done]** `training/grpo_train.py` now performs asset-aware preflight checks and validates either CoreWeave service health or Modal auth before launch.
 
 ### 8.5.3 What is partially done
 
 - **[partial]** The environment is coded, but the real judge story depends on a full, reproducible remote execution path and a clean demo wrapper.
-- **[partial]** The reward loop is implemented in code paths, but still requires successful live Modal A100 evals to be considered benchmark-ready.
+- **[partial]** The reward loop is implemented end to end against a provider-neutral adapter, but still needs successful live A100 verification on the Northflank/CoreWeave service to be considered benchmark-ready.
 - **[partial]** The combined dataset path works, but the currently validated pilot subset is still narrow: local validation produced 19 live-evaluable rows for Stage 1 / Stage 3 (15 CUDA-Agent-derived operator tasks plus 4 DoubleGraph/A100 WCC-style rows), so real task coverage still depends on the full upstream dataset and remote evaluator availability.
 - **[partial]** The repo contains topology-aware graph tasks and DoubleGraph priors, but only a subset currently routes to live evaluation backends today.
 
 ### 8.5.4 What is not done yet
 
-- **[not done]** A verified end-to-end Stage 1 remote training run on Modal H200/Hopper.
+- **[not done]** A verified end-to-end Stage 1 remote training run on the Northflank/CoreWeave-backed hackathon path.
 - **[not done]** A verified Stage 2 run producing a checkpoint from real collected trajectories.
-- **[not done]** A verified Stage 3 GRPO run producing real reward-bearing updates against remote A100 evaluation.
+- **[not done]** A verified Stage 3 GRPO run producing real reward-bearing updates against the live A100 evaluation service.
 - **[not done]** A final launch checklist proving compile rate, correctness rate, reward variance, and wall-clock eval throughput are good enough for hackathon demo use.
 - **[not done]** A final claim table separating implemented / tested / benchmarked / projected results for pitch/demo use.
 
 ### 8.5.5 Immediate blockers
 
-1. **Modal authentication is not configured.**
-   - Without valid `MODAL_TOKEN_ID` / `MODAL_TOKEN_SECRET` or equivalent `modal token new` setup, training cannot execute live reward evaluation.
-2. **Remote run validation is still outstanding.**
-   - The code now passes preflight locally, but the actual remote Stage 0 / Stage 1 / Stage 2 / Stage 3 runs have not yet been validated in this PRD.
-3. **Evaluator coverage is still narrower than the long-term story.**
+1. **Northflank + CoreWeave infrastructure is not yet the validated runtime of record.**
+   - The active deployment target is now Northflank orchestrating workloads on CoreWeave-backed GPU infrastructure, but the PRD does not yet record a completed provider-link / cluster / node-pool / storage bring-up for the exact training and eval path. Sources: [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank), [Deploy GPUs in your own cloud](https://northflank.com/docs/v1/application/gpu-workloads/deploy-gpus-in-your-own-cloud), [CoreWeave volume management](https://v2.docs.coreweave.com/docs/products/storage/distributed-file-storage/manage-volumes).
+2. **The backend migration is implemented in code but not yet fully validated in production.**
+   - The repo now has `eval_service/eval_core.py`, `eval_service/app.py`, and `openenv_env/eval_backend.py`, which make Northflank + CoreWeave the primary path and Modal the fallback. The remaining risk is live deployment and run verification, not missing adapter architecture.
+3. **Remote run validation is still outstanding on the new backend.**
+   - The code passes local tests and preflight, but the actual Stage 0 / Stage 1 / Stage 2 / Stage 3 flows still need end-to-end validation on the Northflank + CoreWeave path.
+4. **Evaluator coverage is still narrower than the long-term story.**
    - Current live routing mainly covers WCC plus the stateless subset of Ops-6K-style tasks, not the full kernel/task universe.
 
 ### 8.5.6 Immediate next tasks (execution order)
 
-#### Task A: Unblock remote execution
+#### Task A: Stand up the active backend target
 - **Status:** Not done
-- **Owner:** Infra
+- **Owner:** Infra teammate
 - **Subtasks:**
-  - Configure Modal credentials locally.
-  - Deploy `modal_app.py` so `kernelforge-a100` exists remotely before the training smoke path calls `modal.Function.from_name(...)`.
-  - Verify `modal run modal_train.py --stage 0` completes successfully.
-  - Verify the remote training image can see `/root/datasets` and `/root/docs/research/doublegraph`.
-- **Done when:** The eval app is deployed and Stage 0 smoke test passes on remote GPU.
+  - Link CoreWeave to Northflank and create or select the target cluster/project.
+  - Provision the GPU node pools needed for the hackathon path: H200-class or H100 fallback for training, and A100 for eval.
+  - Provision the persistent storage needed for checkpoints, datasets, and model caches.
+  - Define the workload split between the remote evaluation service and the training job.
+- **Done when:** The Northflank + CoreWeave environment can host both the eval backend and the training workload with persistent storage and secrets wired.
 
-#### Task B: Validate Stage 1 warmup on remote GPU
-- **Status:** Not done
-- **Owner:** Training
+#### Task B: Validate the landed backend adapter under real deployment
+- **Status:** Done in code, pending runtime validation
+- **Owner:** Infra teammate
 - **Subtasks:**
+  - Preserve the existing evaluator result contract (`compiles`, `correct`, `runtime_ms`, `speedup_vs_orig`, `speedup_vs_dg`, `runtime_stats`, `verifier_msg`, `error`).
+  - Verify `openenv_env/eval_backend.py` routes correctly to the Northflank/CoreWeave service in live deployment.
+  - Keep Modal as a legacy fallback only until the new backend is validated.
+- **Done when:** `training/task_support.py`, the OpenEnv environment, and SkyDiscover all reach the active backend successfully through the shared adapter.
+
+#### Task C: Validate Stage 0 / Stage 1 / Stage 3 on the new backend
+- **Status:** Not done
+- **Owner:** Training + Infra teammate
+- **Subtasks:**
+  - Run a minimal evaluator smoke test against the Northflank + CoreWeave deployment.
   - Run Stage 1 with a low step count first.
-  - Verify model load, dataset load, rollout generation, local compile fast-fail, and remote reward dispatch.
-  - Confirm checkpoints are written to the Modal volume.
-- **Done when:** A short Stage 1 run finishes and saves a checkpoint.
+  - Run a tiny Stage 3 GRPO pilot after Stage 1 / Stage 2 artifacts exist.
+  - Verify model load, dataset visibility, rollout generation, local compile fast-fail, remote reward dispatch, and checkpoint persistence on the new path.
+- **Done when:** A short end-to-end training flow completes on the active backend and saves artifacts successfully.
 
-#### Task C: Validate Stage 2 RFT/SFT merge path
-- **Status:** Not done
-- **Owner:** Training
-- **Subtasks:**
-  - Collect a small trajectory set from the Stage 1 checkpoint.
-  - Verify filtered trajectories are merged with DoubleGraph SFT prior rows.
-  - Confirm `SFTTrainer` can train on the merged dataset without schema issues.
-- **Done when:** Stage 2 produces a checkpoint and logs merged dataset counts.
-
-#### Task D: Validate Stage 3 GRPO pilot
-- **Status:** Not done
-- **Owner:** Training
-- **Subtasks:**
-  - Run Stage 3 with low `max_steps` first.
-  - Confirm curriculum sampling, reward extraction, and checkpoint resume behavior.
-  - Inspect reward distribution for collapse / zero-signal behavior.
-- **Done when:** Stage 3 completes a short run with non-trivial reward output.
-
-#### Task E: Benchmark launch readiness
+#### Task D: Benchmark launch readiness on the active backend
 - **Status:** Not done
 - **Owner:** Evaluation
 - **Subtasks:**
   - Measure compile rate after Stage 1.
   - Measure correctness rate after Stage 2.
   - Measure reward variance / improvement signal during Stage 3.
-  - Record eval throughput and cost on the real remote setup.
-- **Done when:** We can decide truthfully whether to ship `environment + SFT + search` or `environment + SFT + GRPO`.
+  - Record eval throughput, storage behavior, and operational overhead on the Northflank + CoreWeave setup.
+- **Done when:** We can decide truthfully whether to ship `environment + SFT + search` or `environment + SFT + GRPO` on the new backend.
 
-### 8.5.7 Exact Modal execution order (current repo)
+### 8.5.6A KernelGYM → OpenEnv bridge plan (hackathon-authoritative)
 
-The current shortest-path run order is:
+KernelGYM and OpenEnv are **not competing choices** in this repo. KernelForge is building a **custom lightweight OpenEnv wrapper** as the standardized public environment boundary: typed `Action` / `Observation` / `State`, `step()` / `reset()` / `state()`, HTTP/container packaging, and TRL/OpenEnv compatibility. Under that wrapper, the execution system should follow KernelGYM's lessons: keep GPU evaluation behind a robust backend that separates learning clients from execution, serializes profiling-sensitive work, isolates failures, and can scale from single-node bring-up to multi-worker execution. For the hackathon PRD, the correct stance is therefore: **custom lightweight OpenEnv wrapper at the edge, KernelForge task/reward/rollout logic in the middle, KernelGYM-style backend underneath**. Sources: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv environment guide](https://github.com/meta-pytorch/OpenEnv/blob/main/envs/README.md), [TRL OpenEnv integration](https://huggingface.co/docs/trl/en/openenv), [Dr. Kernel / KernelGYM paper](https://arxiv.org/abs/2602.05885), [KernelGYM repo](https://github.com/hkust-nlp/KernelGYM).
 
-> Pre-run reliability note: `modal_train.py` now treats Unsloth installation as fail-fast during image build so dependency issues surface before remote training starts, while `flash-attn` remains best-effort optional. This matches the current single-H200 no-vLLM bring-up strategy where avoiding masked dependency failures is critical before running expensive remote jobs.
+| Layer | Repo role | Current hook | What the PRD should say |
+|-------|-----------|--------------|--------------------------|
+| OpenEnv surface | Public environment contract | `openenv_env/kernel_forge_env.py`, `openenv_env/server/app.py`, `openenv_env/client.py`, `openenv.yaml` | This stays the official interface for judges, demos, and TRL/OpenEnv compatibility. |
+| KernelForge logic | Task selection, reward shaping, rollout behavior, prompt/feedback handling | `training/task_support.py`, `training/multi_turn_rollout.py`, `openenv_env/reward.py`, `training/custom_grpo_trainer.py` | This is the project-specific logic layer and should not be conflated with cloud/backend choice. |
+| Execution backend | Remote compile / verify / benchmark / profile plane | `eval_service/eval_core.py`, `eval_service/app.py`, `openenv_env/eval_backend.py`, with `modal_app.py` as fallback | The repo now has the provider-neutral adapter plus shared eval core; the next step is live validation and stronger worker-style isolation, not architectural reinvention. |
 
-1. **Authenticate Modal locally**
-   ```bash
-   uv run modal token new
-   ```
-2. **Deploy the eval app first**
-   ```bash
-   KERNELFORGE_MODAL_APP=kernelforge-a100 uv run modal deploy modal_app.py
-   ```
-3. **Run the training smoke test on H200**
-   ```bash
-   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 uv run modal run modal_train.py --stage 0
-   ```
-4. **Run Stage 1 dry-run on H200**
-   ```bash
-   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE1_MAX_TURNS=3 uv run modal run modal_train.py --stage 1 --dry-run
-   ```
-5. **Run a tiny Stage 1 warmup on the streamlined hackathon path (after smoke + dry-run pass)**
-   ```bash
-   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE1_MAX_TURNS=3 uv run modal run modal_train.py --stage 1 --max-steps 5
-   ```
-6. **Run Stage 2 after Stage 1 checkpoint exists**
-   ```bash
-   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 uv run modal run modal_train.py --stage 2
-   ```
-7. **Run a tiny Stage 3 GRPO pilot**
-   ```bash
-   KERNELFORGE_MODAL_APP=kernelforge-a100 KERNELFORGE_TRAIN_GPU=H200 KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE3_MAX_TURNS=3 uv run modal run modal_train.py --stage 3 --max-steps 5
-   ```
+#### Authoritative stance for the PRD
+
+- **KernelForge exposes a custom lightweight OpenEnv wrapper as the canonical external environment contract.**
+  - `openenv_env/` is the layer judges, demos, and TRL/OpenEnv tooling should see, even though the real execution work happens underneath in the shared backend.
+- **KernelForge owns the task and reward logic, and RL/GRPO can integrate with it directly.**
+  - Prompt construction, task routing, reward normalization, rollout policy, and TRLOO stay in-repo and stay provider-agnostic.
+  - The OpenEnv wrapper exists for standards compatibility and external use; the training loop may still call the shared backend contract directly for efficiency, which is consistent with TRL's custom rollout model. Source: [TRL OpenEnv integration](https://huggingface.co/docs/trl/en/openenv)
+- **KernelGYM is the backend architecture reference.**
+  - The remote execution plane should borrow KernelGYM's lessons: separated client/execution roles, robust worker isolation, serialized timing-sensitive evaluation, and eventual queue/worker scalability.
+- **Northflank + CoreWeave are the active backend target.**
+  - Current Modal code is transition code, not the architecture to promote in the final hackathon story.
+
+#### The actual weakness in the current repo
+
+The current PRD is directionally correct, but the repo still has one major inversion: the reward-bearing seam is not yet unified.
+
+- `KernelForgeEnv.step()` and `multi_turn_rollout.py` still duplicate pieces of state / feedback / evaluation logic.
+- The real evaluator seam still lives in `training/task_support.py`.
+- Training can still end up “owning” too much of the execution path instead of submitting work into a shared backend layer.
+
+That is the first thing to fix, because it is the exact layer boundary KernelGYM gets right conceptually. Source: [KernelGYM repo](https://github.com/hkust-nlp/KernelGYM).
+
+#### Concrete holes in the current gym/setup
+
+- **Hole 1 — The reward-bearing seam is not fully unified.**
+  - `build payload → dispatch remote eval → normalize result → compute reward` should live in one neutral runtime module, not partly in `training/task_support.py` and partly in callers.
+- **Hole 2 — OpenEnv and training still duplicate stateful logic.**
+  - `KernelForgeEnv.step()` and `multi_turn_rollout.py` both manage overlapping feedback and state responsibilities.
+- **Hole 3 — The environment layer depends on a training namespace.**
+  - `KernelForgeEnv.step()` imports execution helpers from `training/task_support.py`, which is the wrong long-term dependency direction.
+- **Hole 4 — The execution backend is not yet described as a worker system.**
+  - The PRD should describe the backend as a simplified KernelGYM-style execution plane, not just “some remote service.”
+- **Hole 5 — Full distributed orchestration is not required for launch.**
+  - Redis/multi-node scheduling is future work; one remote evaluation service plus isolated GPU workers is enough for the hackathon.
+
+#### Concrete execution plan
+
+#### Task F: Unify the reward-bearing seam
+- **Status:** Not done
+- **Owner:** Architecture / Environment
+- **Subtasks:**
+  - Extract `build payload → dispatch remote eval → normalize result → compute reward` into one neutral module such as `evaluation/runtime_adapter.py`.
+  - Remove duplicate normalization / adapter logic from `KernelForgeEnv.step()` and `multi_turn_rollout.py`.
+  - Keep the output schema stable across callers.
+- **Done when:** OpenEnv and GRPO both consume the exact same evaluator contract through one shared module.
+
+#### Task G: Define the backend contract explicitly
+- **Status:** Not done
+- **Owner:** Architecture / Infra
+- **Subtasks:**
+  - Define adapter inputs such as `task_type`, `candidate_code`, `baseline_ref`, `eval_mode`, and `resource_target`.
+  - Define stable outputs such as `compiles`, `correct`, `runtime_ms`, `speedup_vs_baseline`, `metrics`, and `error`.
+  - Ensure the contract can be served by the current legacy Modal path and the Northflank + CoreWeave target path.
+- **Done when:** Provider migration can happen without changing reward consumers.
+
+#### Task H: Build a simplified KernelGYM-style worker plane
+- **Status:** Not done
+- **Owner:** Infra teammate
+- **Subtasks:**
+  - Run one GPU worker per A100 target.
+  - Execute each candidate evaluation in a subprocess.
+  - Add timeout / retry / crash recovery.
+  - Add persistent baseline cache and worker health heartbeat.
+- **Done when:** One bad kernel cannot poison the whole remote evaluator and timing remains reliable under repeated runs.
+
+#### Task I: Keep OpenEnv untouched at the edge
+- **Status:** Not done
+- **Owner:** Environment
+- **Subtasks:**
+  - Keep `KernelForgeEnv.reset()`, `step()`, and `state()` as the public environment interface.
+  - Make those methods call the shared runtime adapter instead of owning transport-specific logic.
+  - Keep `openenv.yaml` and the OpenEnv server/client story stable for judges and demos.
+- **Done when:** OpenEnv remains the only public environment contract.
+
+#### Task J: Leave training transport alone for the hackathon
+- **Status:** Not done
+- **Owner:** Training
+- **Subtasks:**
+  - Keep GRPO rollout calling the shared runtime adapter directly.
+  - Do not force an HTTP hop into the inner training loop.
+  - Preserve the existing multi-turn, compile-fast-fail path while the backend changes underneath it.
+- **Done when:** Training stays low-latency while sharing the same reward/result contract as the OpenEnv path.
+
+### 8.5.7 Backend rollout order (Northflank + CoreWeave target, Modal transition only)
+
+The fastest one-shot rollout order is:
+
+> KernelGYM's core lesson is to separate the learning client from the execution backend and keep the backend robust, isolated, and schedulable. For this repo, that means we should switch the backend behind an adapter, not rewrite the whole environment stack. Sources: [Dr. Kernel / KernelGYM paper](https://arxiv.org/abs/2602.05885), [KernelGYM repo](https://github.com/hkust-nlp/KernelGYM).
+
+1. **Provision the active backend target first**
+   - Link CoreWeave to Northflank.
+   - Create or select the Northflank project/cluster.
+   - Provision the GPU node pools needed for training and eval.
+   - Provision persistent storage for checkpoints, datasets, and caches.
+   Sources: [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank), [Deploy GPUs in your own cloud](https://northflank.com/docs/v1/application/gpu-workloads/deploy-gpus-in-your-own-cloud), [CoreWeave volume management](https://v2.docs.coreweave.com/docs/products/storage/distributed-file-storage/manage-volumes).
+
+2. **Deploy the remote evaluation backend before training**
+   - The evaluator service/job must exist before Stage 0 / Stage 1 / Stage 3 can succeed.
+   - Keep the evaluator result schema stable while the provider implementation changes.
+
+3. **Land the config-switched backend adapter**
+   - Keep current Modal code as a transition fallback only.
+   - Make the active path provider-neutral so `training/task_support.py`, `multi_turn_rollout.py`, `evaluation/eval_model.py`, and `openenv_env/kernel_forge_env.py` stop depending on a provider-specific SDK directly.
+
+4. **Run a minimal smoke test on the active backend**
+   - Validate one baseline profiling call and one candidate evaluation call.
+   - Confirm storage mounts / caches / secrets are visible from the remote workload.
+
+5. **Run Stage 1 dry-run, then tiny warmup, then Stage 2, then tiny Stage 3**
+   - Preserve the existing multi-turn, no-`vLLM` hackathon defaults unless throughput forces an emergency fallback.
+   - Verify checkpoint persistence and remote reward extraction before scaling steps.
+
+6. **Keep the legacy Modal path only as a temporary escape hatch**
+   - Do not treat it as the deployment plan of record.
+   - Remove it from the primary judge/demo story as soon as the new backend path is validated.
 
 Why this order matters:
-- `modal deploy` creates a deployed app, while `modal run` creates an ephemeral app. Sources: [modal deploy docs](https://modal.com/docs/reference/cli/deploy), [modal run docs](https://modal.com/docs/reference/cli/run), [Apps guide](https://modal.com/docs/guide/apps).
-- The current smoke / environment paths call `modal.Function.from_name(EVAL_APP_NAME, ...)`, so the eval app must exist remotely before the training smoke test can pass.
-- Modal explicitly supports `gpu="H200"` and `gpu="A100"`, and lists current H200 / A100 pricing on its pricing page. Sources: [Modal GPU guide](https://modal.com/docs/guide/gpu), [Modal pricing](https://modal.com/pricing), [H200 on Modal](https://modal.com/blog/introducing-b200-h200).
+- Northflank is designed to run GPU workloads as services and jobs across managed or bring-your-own cloud clusters, including CoreWeave-backed infrastructure. Sources: [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [Deploy GPUs in your own cloud](https://northflank.com/docs/v1/application/gpu-workloads/deploy-gpus-in-your-own-cloud).
+- Northflank documents direct CoreWeave integration for provider linking, cluster management, and workload deployment. Source: [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank).
+- CoreWeave documents persistent-volume management through PVC-backed storage, which is the relevant storage model for checkpoints and caches on the new backend. Source: [CoreWeave volume management](https://v2.docs.coreweave.com/docs/products/storage/distributed-file-storage/manage-volumes).
 - TRL’s OpenEnv integration supports custom `rollout_func` flows for GRPO, which is the pattern used by this repo. Source: [TRL OpenEnv docs](https://huggingface.co/docs/trl/main/en/openenv).
 
 ---
@@ -1198,14 +1283,14 @@ Key function: `compile_cuda(source: str, extra_flags: list) -> CompileResult`
 #### Task 3: `evaluation/verifier.py` — Correctness Checking
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Tasks 1, 2
 
-**Current status (March 6): Partial, implemented across Modal + task-routing code**
-- There is no dedicated `evaluation/verifier.py` module in the repo today.
-- However, correctness gating is already part of the current evaluation contract: task routing lives in `training/task_support.py`, evaluator dispatch lives through Modal, and correctness remains a hard gate before positive reward.
-- The missing piece is not the idea of verification; it is a fully verified end-to-end remote run proving the correctness path works reliably on the actual A100 backend.
+**Current status (March 6): Implemented in repo, still needs live remote validation**
+- `evaluation/verifier.py` exists and provides a dedicated `verify_kernel(...) -> VerifyResult` wrapper.
+- Correctness gating also remains part of the broader shared evaluation contract: task routing lives in `training/task_support.py`, evaluator dispatch lives through the shared backend adapter, and correctness remains a hard gate before positive reward.
+- The missing piece is not the existence of verification code; it is a fully verified end-to-end remote run proving the correctness path works reliably on the actual A100 backend.
 
 **Execution-based correctness is mandatory (P0).** CUDABench (arXiv 2603.02236) explicitly reports "mismatch between high compilation success and low functional correctness" — compile success alone is a bad proxy that enables reward hacking (model learns minimal kernels that compile but produce garbage). Verification must:
 1. Check compiled .so for forbidden symbols via `nm -D`
-2. **Run kernel on 5+ randomized inputs on A100** (via Modal)
+2. **Run kernel on 5+ randomized inputs on A100** (via the configured remote backend)
 3. **Compare outputs to PyTorch reference with tolerances** (rtol=1e-3, atol=1e-5 for fp32)
 4. Fail hard on NaN, OOB, shape mismatch
 
@@ -1220,12 +1305,12 @@ Key function: `verify_kernel(so_path: str, task_code: str) -> VerifyResult`
 #### Task 4: `evaluation/profiler.py` — Baseline Timing
 **Priority:** P0 | **Time:** 1 hour | **Depends on:** Task 1
 
-**Current status (March 6): Partial, implemented under Modal evaluator paths**
-- There is no dedicated `evaluation/profiler.py` module in the repo today.
-- Baseline timing functionality is currently expressed through the Modal-side evaluator and baseline helpers rather than through a separate local profiler abstraction.
+**Current status (March 6): Implemented in repo, still needs live remote validation**
+- `evaluation/profiler.py` exists and provides a dedicated `profile_kernel(...) -> ProfileResult` wrapper.
+- The primary hackathon runtime still relies on the shared remote evaluator path (`eval_service/eval_core.py` via `openenv_env/eval_backend.py`) for reward-bearing timing.
 - The remaining open work is validation, not just implementation: we still need confirmed remote A100 baseline timings on the deployed path before this task can be called fully done.
 
-Profile torch.eager and torch.compile for a task on **A100 (Modal)**. CUDA events, 50 warmup, 30 runs, trimmed mean. **Must run on A100 — H200 timings are for the wrong architecture.**
+Profile torch.eager and torch.compile for a task on **remote A100**. CUDA events, 50 warmup, 30 runs, trimmed mean. **Must run on A100 — H200 timings are for the wrong architecture.**
 
 Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` and `compile_ms`.
 
@@ -1239,9 +1324,9 @@ Key function: `profile_task(task_code: str) -> ProfileResult` with `eager_ms` an
 **Current status (March 6): Partial, core reward logic exists**
 - `openenv_env/reward.py` exists and the canonical reward computation is already integrated into the current training/evaluation stack.
 - The current code correctly preserves the main hackathon rule that failed compile or failed correctness cannot receive positive reward.
-- What is still unfinished is the full validation story for the end-to-end fast path on live Modal A100 runs and any optional slow-path bonus logic.
+- What is still unfinished is the full validation story for the end-to-end fast path on live remote A100 runs and any optional slow-path bonus logic.
 
-THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, dispatches to Modal A100 for execution-based correctness + speedup timing.
+THE function passed to `GRPOTrainer(reward_funcs=...)`. Takes completions, extracts CUDA, and dispatches to the configured remote A100 backend for execution-based correctness + speedup timing.
 
 **2-tier reward architecture:**
 - **Fast path (all rollouts):** CUDA events timing on A100 + execution correctness + cheap static metrics (ptxas register count, shared mem, occupancy estimate). Returns discrete milestone reward `{-1, 1, 2, 3}`.
@@ -1497,7 +1582,7 @@ def evaluate(program_path: str) -> dict:
 
 > **IMPLEMENTATION NOTE (March 5, 2026):** Actual implementation in `skydiscover_integration/evaluator.py` uses `KernelForgeEvaluator` class with:
 > - `evaluate_stage1()`: local nvcc compile check (fast, ~50% filter)
-> - `evaluate_stage2()`: full Modal A100 benchmark via `validate_eval_result()` + `compute_reward()`
+> - `evaluate_stage2()`: full remote A100 benchmark via `validate_eval_result()` + `compute_reward()`
 > - `evaluate_program()`: async cascade (SkyDiscover-compatible)
 > - `evaluate()`: sync file-based interface
 > - `EvaluationResult` dataclass with `combined_score`, `metrics`, `artifacts`, `error`
@@ -2034,7 +2119,7 @@ The three Fundamental Failures above (6.0.1-6.0.3) are real. But they are addres
 | **Thu 1PM-6PM** | 5 hrs | **P0 — Core pipeline:** Copy CUDA-Agent eval scripts verbatim into evaluation/. Wire discrete milestone reward function {-1, 1, 2, 3}. Add TRLOO N/(N-1) post-process wrapper. Gate G-0.3. | 2 hr buffer |
 | **Thu 6PM-11PM** | 5 hrs | **P1 — SkyDiscover (parallel):** Set up evaluator on 5 seed .cu files. Launch 80-120 evolution runs. **P2 — SKILL.md:** Copy CUDA-Agent SKILL.md verbatim. Extract doubleGraph patterns into prompt context. | SkyDiscover runs overnight |
 | **Fri 9AM-1PM** | 4 hrs | **P2 — SFT warmup:** 50-example SFT via Unsloth built-in trainer. Verify >70% compile rate with local nvcc. Gate G-0.8: 5-step GRPO sanity check. | If compile rate <70%, extend SFT |
-| **Fri 1PM-Sat 3AM** | 14 hrs | **P3 — GRPO pilot:** H200 generates + updates weights; Modal A100 evaluates correctness + speedup for reward. Only if G-0.8 passes. Short run with strict abort gates. | If GRPO stalls, SFT + SkyDiscover results are the submission |
+| **Fri 1PM-Sat 3AM** | 14 hrs | **P3 — GRPO pilot:** H200 generates + updates weights; the configured remote A100 backend evaluates correctness + speedup for reward. Only if G-0.8 passes. Short run with strict abort gates. | If GRPO stalls, SFT + SkyDiscover results are the submission |
 | **Sat 9AM** | 30 min | **Gate G-25**: compilation rate decision. Evaluate all tracks. | Decision tree in 6.6 |
 | **Sat 9:30AM-5PM** | 7.5 hrs | Collect best kernels from all tracks. OpenEnv wrapper. Run final eval suite. | SkyDiscover is the hedge |
 | **Sat 5PM-10PM** | 5 hrs | Results collection, demo, blog | 2 hr buffer |
@@ -2064,7 +2149,7 @@ This is a credible hackathon submission. The infrastructure IS the contribution 
 By submission time, the strongest credible package is:
 
 1. **OpenEnv-compatible CUDA optimization environment** — real `step()/reset()/state()` contract
-2. **Real compile / correctness / timing evaluation** — on A100 via Modal
+2. **Real compile / correctness / timing evaluation** — on A100 via the configured remote backend
 3. **H200 + Qwen3-Coder-30B-A3B-Instruct training/search loop** — SFT + GRPO pilot + SkyDiscover
 4. **A100-targeted kernel optimization demo** — with measured results
 5. **Clear explanation of how this scales into future one-GPU kernel-optimization research**
@@ -2137,7 +2222,7 @@ CUDA-Agent (Seed 1.6 230B MoE, 23B active, 128× H20 GPUs, PPO with critic, batc
 | Prompt context | Basic system prompt | CUDA-Agent SKILL.md + doubleGraph A100 patterns (1,600+ lines) | **US** (richer optimization priors) |
 | Inference-time compute | 1 candidate per problem | **Best-of-8** (generate 8, pick fastest correct) | **US** (3-5× effective improvement) |
 | Expert demonstrations | 0 | 192 A100 kernels from doubleGraph (84K+ lines) | **US** (∞ — they have zero expert signal) |
-| Evolutionary hedge | None | SkyDiscover on same Modal A100 eval pipeline | **US** (independent search for hardest problems) |
+| Evolutionary hedge | None | SkyDiscover on same shared remote A100 eval pipeline | **US** (independent search for hardest problems) |
 | Eval cost | 128 GPUs → unlimited parallelism | Single A100 Modal → sequential | THEM |
 
 ### 7.4 Per-Metric Assessment
@@ -2183,7 +2268,7 @@ STAGE 1 — WARMUP (target: 90%+ compile rate)
   Model: Qwen3-Coder-Next 80B FP8 on B200 (192GB, $6.25/hr)
   Steps: 300, G: 2, Max turns: 5, Temp: 0.9, LR: 3e-6
   Context: 8,192 tokens
-  Eval: Local nvcc fast-fail + Modal A100 for correctness + speedup
+  Eval: Local nvcc fast-fail + remote A100 backend for correctness + speedup
   Credit: TRLOO N/(N-1)
   Cost: ~3.5 hrs × $6.25 = $21.88
 
@@ -2221,14 +2306,14 @@ STAGE 3 — GRPO + CURRICULUM (future scale-up config — NOT hackathon)
 ```
 BEST-OF-N INFERENCE:
   Generate 8 candidates per problem (4 prompts × G=2)
-  Evaluate all 8 on Modal A100
+  Evaluate all 8 on the configured remote A100 backend
   Select fastest correct kernel
   Cost: 8 evals × 50 problems × $0.02/eval = ~$8
 
 SKYDISCOVER EVOLUTIONARY SEARCH:
   For Level 3 (hardest) problems only (~20% of eval)
   Start from GRPO best outputs + doubleGraph seeds
-  100 iterations of mutation + recombination on same Modal A100 pipeline
+  100 iterations of mutation + recombination on the same shared remote A100 pipeline
   Cost: ~$10
 
 Inference total: ~$18
@@ -2332,7 +2417,7 @@ The strategy has four layers:
 
 1. **Expert bootstrapping** — 192 real A100 kernels via SFT puts us at CUDA-Agent's ~step-50 level before RL begins. They have ZERO expert demonstrations.
 2. **Efficient RL** — TRLOO on 50 steps (hackathon pilot) with discrete milestone rewards. MARS [DROPPED], CPPO [DROPPED]. The original "12-25x more learning per sample" projection is **[SPECULATIVE]** and not achievable with current stack.
-3. **Inference-time compute** — Best-of-8 candidate selection closes the remaining gap. Generate 8, evaluate all, pick the fastest correct kernel. Cheap on Modal A100.
+3. **Inference-time compute** — Best-of-8 candidate selection closes the remaining gap. Generate 8, evaluate all, pick the fastest correct kernel. Cheap on the shared remote eval backend relative to training.
 4. **SkyDiscover hedge** — Evolutionary search on the hardest problems, starting from GRPO outputs + doubleGraph seeds. Independent of RL convergence.
 
 **Cost:** ~$155 total ($125 after credits). vs CUDA-Agent's ~$5,000-10,000+.
@@ -2405,7 +2490,7 @@ Before sending candidates to A100 eval ($2.50/hr), CPPO would score them cheaply
 
 Even if GRPO underperforms projections, SkyDiscover provides a floor:
 - Starts from real doubleGraph WCC kernel (already 3.6× over cuGraph)
-- Evolves via mutation + recombination using same Modal A100 eval infrastructure
+- Evolves via mutation + recombination using the same shared remote A100 eval infrastructure
 - Produces demo-worthy results independent of GRPO convergence
 - Projected floor with SkyDiscover only (no GRPO): ~1.5-2.0× on graph algorithms
 

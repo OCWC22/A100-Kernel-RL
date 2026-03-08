@@ -16,12 +16,10 @@ if __package__ in {None, ""}:
 from training.multi_turn_rollout import extract_cuda_code
 from training.task_support import (
     build_generation_prompt,
-    evaluate_code_on_modal,
+    evaluate_code_remote,
     filter_supported_tasks,
     summarize_tasks,
 )
-
-MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 EVAL_PROBLEMS = 50
@@ -71,7 +69,7 @@ def evaluate_checkpoint(
             if not code:
                 raise RuntimeError("Model response did not contain CUDA/C++ code")
 
-            result = evaluate_code_on_modal(code, task, modal_app_name=MODAL_APP_NAME)
+            result = evaluate_code_remote(code, task)
             reward = float(result.get("reward", -1.0))
 
             if result.get("compiles"):

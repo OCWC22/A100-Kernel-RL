@@ -25,7 +25,7 @@
 ### Hackathon recommendation
 - **Start from structured priors**, then do SFT warmup, then GRPO pilot, then search / best-of-N as a hedge
 - Model: Qwen3-Coder-30B-A3B-Instruct on H200
-- Eval: A100 80GB via Modal
+- Eval: A100 80GB via the active remote backend target (Northflank + CoreWeave), with the current Modal path treated as legacy transition code
 - Priors: DoubleGraph kernels + `skills.md` + curated CUDA-Agent-style tasks
 - G=2, short context, discrete milestone reward {-1, 1, 2, 3}, execution-based correctness, limited-step run with hard abort gates
 - Because under a hackathon budget, the highest-leverage thing is not elegant RL theory — it is working reward plumbing, working correctness checks, working timing on the actual target hardware, and enough prior structure that RL steps are not mostly wasted.
@@ -219,6 +219,22 @@ That means:
 
 **Operational conclusion:** because budget is tight, start with SFT-first + shallow GRPO. Because evaluation is expensive, correctness and reward plumbing matter more than fancy RL theory. Because we target a hackathon, working feedback loops beat elegant but unrun architecture.
 
+### 6.1 Where OpenEnv fits in the hackathon stack
+
+OpenEnv and KernelGYM solve different problems. For KernelForge, the plan is to build a **custom lightweight OpenEnv wrapper** that standardizes how the agent talks to the environment: typed models, `step()` / `reset()` / `state()`, HTTP serving, and reusable environment packaging. Underneath that wrapper, KernelGYM is the architecture reference for how kernel evaluation should run: separate learning clients from execution, serialize profiling-sensitive work, isolate failures, and eventually scale through workers. For KernelForge, the correct hackathon interpretation is:
+
+1. **KernelForge uses a custom lightweight OpenEnv wrapper as the public environment contract.**
+   - Judges, demos, and future external integrations should talk to `openenv_env/`.
+2. **KernelForge owns the task/reward/rollout logic.**
+   - `task_support.py`, `multi_turn_rollout.py`, reward normalization, and TRLOO are the project-specific logic layer.
+3. **KernelGYM is the backend architecture reference.**
+   - The remote evaluation plane should evolve into a simplified worker system behind a provider-neutral adapter.
+4. **Training transport should stay direct for now.**
+   - The OpenEnv wrapper is part of the real architecture, but forcing every Stage 3 turn through the HTTP server would add transport overhead without improving reward fidelity, because the reward-bearing invariant is the shared runtime adapter and shared reward math.
+   - This is still compatible with TRL/OpenEnv because custom rollout functions may integrate with an environment while keeping training-specific transport logic optimized. Source: [TRL OpenEnv integration](https://huggingface.co/docs/trl/en/openenv)
+
+This is the shortest path that stays aligned with TRL's documented OpenEnv support while preserving the low-latency compile-fast-fail and multi-turn repair loop needed for a hackathon budget. Sources: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv environment guide](https://github.com/meta-pytorch/OpenEnv/blob/main/envs/README.md), [TRL OpenEnv integration](https://huggingface.co/docs/trl/en/openenv), [Dr. Kernel / KernelGYM paper](https://arxiv.org/abs/2602.05885), [KernelGYM repo](https://github.com/hkust-nlp/KernelGYM).
+
 ### 7. Quick Reference Table
 
 | Method          | Advantage Formula                          | Bias? | Multi-turn Credit? | Memory on B200 | Your Hackathon Use |
@@ -351,14 +367,14 @@ return unbiased.tolist()
 
 That single multiplication `*(N/(N-1))` is the entire mathematical fix.
 
-### 6. Why This Works for the Hackathon Stack (H200 + Modal A100 + CUDA-Agent)
+### 6. Why This Works for the Hackathon Stack (H200-class training + remote A100 eval + CUDA-Agent)
 
-- Rewards come from **CUDA events timing on Modal A100** + execution-based correctness (discrete milestone {-1, 1, 2, 3})
+- Rewards come from **CUDA events timing on remote A100 hardware** + execution-based correctness (discrete milestone {-1, 1, 2, 3})
 - G=2 keeps eval budget low, TRLOO N/(N-1) fixes the bias
 - Hackathon config: Qwen3-Coder-30B-A3B-Instruct on H200 gen + A100 eval
 - **Expert demonstrations**: 192 A100 kernels from doubleGraph as SFT data (`doublegraph_sft.jsonl`) + combined RL prompts (`combined_kernelforge.jsonl`)
 - **Rich SKILL.md**: 178 lines with 7 real A100 patterns from production code via `skill_builder.py:_append_a100_patterns()`
-- **SkyDiscover parallel hedge**: `skydiscover_integration/evaluator.py` bridges evolutionary search to same Modal A100 eval pipeline
+- **SkyDiscover parallel hedge**: `skydiscover_integration/evaluator.py` should point at the same backend adapter so evolutionary search and GRPO share one remote A100 evaluation contract during the Northflank + CoreWeave migration
 
 ### 7. Quick Reference Table (Copy into Your PRD Appendix)
 
@@ -581,7 +597,7 @@ TOTAL MODEL + TRAINING             ~34.5 GB
 REMAINING FREE                     ~106.5 GB     ← Comfortable fit on H200
 ```
 
-> **Note:** Eval runs on Modal A100, not co-located. H200 only handles model weights, generation, and gradient updates.
+> **Note:** Eval runs on the remote A100 backend selected by `KERNELFORGE_EVAL_BACKEND` — Northflank/CoreWeave service by default, Modal only as fallback. H200 only handles model weights, generation, and gradient updates.
 
 ### Model: Qwen3.5-9B (Dense)
 
@@ -1377,7 +1393,7 @@ def multi_turn_hybrid_rollout(prompts, trainer):
     """
     Custom rollout with:
     1. MARS+TRLOO per-turn credit assignment
-    2. Hybrid eval (local turns 1-2, Modal turn 3)
+    2. Hybrid eval (local turns 1-2, remote A100 backend turn 3)
     3. Nsight structured reward (see GRPO-9)
     4. Early stop at r >= 2
 
@@ -1502,7 +1518,7 @@ TOTAL PER STEP (multi-turn, 3T):   ~270-930s    ~4.5-15 minutes
 | Stage 2 (RFT, SFT) | N/A | N/A | ~30 min | 100 |
 | Stage 3 (pilot, H200+A100) | 50 | ~2 min | ~2 hours | 100 |
 
-**Reality check (revised):** Stage 3 is a GRPO pilot (H200 generates, A100 evaluates via Modal). Full pipeline: ~2 hrs (Stage 1) + 30 min (Stage 2) + 2 hrs (Stage 3) = ~4.5 hours. Stage 3 only runs if Gate G-0.8 passes.
+**Reality check (revised):** Stage 3 is a GRPO pilot (H200 generates, A100 evaluates through the remote backend selected by `KERNELFORGE_EVAL_BACKEND`). Full pipeline is still gated by remote eval throughput, so Stage 3 only runs if Gate G-0.8 passes.
 
 ### Hackathon-Adjusted Budget
 
@@ -1674,7 +1690,7 @@ HACKATHON CONFIGURATION (March 5, 2026):
   Learning rate = 2e-6 (Stage 1) → 3e-6 (Stage 3)
   LoRA rank = 16, target = qkvo + gate/up/down
   Credit = TRLOO only (default; set `KERNELFORGE_USE_TRLOO=0` to use vanilla GRPO) (MARS DROPPED — see GRPO-4)
-  Eval = Hybrid: local nvcc+PAC early turns, Modal A100 final turn (GRPO-10)
+  Eval = Hybrid: local nvcc+PAC early turns, configured remote A100 backend for reward-bearing final evaluation (GRPO-10)
   Loss = standard clip (MASPO DEFERRED — see GRPO-12)
   Pruning = CPPO DROPPED (see GRPO-11)
 
@@ -1712,7 +1728,7 @@ CUDABench (arXiv 2603.02236): "mismatch between high compilation success and low
 Nsight metrics can provide additional diagnostic signal. They are currently available as optional kwargs in `compute_reward()` but are **not** part of the primary discrete reward. Future work may use them for a continuous reward variant:
 
 ```bash
-# ncu command for Modal A100 endpoint
+# ncu command for the remote A100 eval endpoint
 ncu --metrics \
     sm__warps_active.avg.pct_of_peak_sustained_active,\
     l1tex__t_bytes_pipe_lsu_mem_global_op_ld.sum.pct_of_peak_sustained,\
@@ -1780,30 +1796,30 @@ def trloo_post_process(advantages: list[float], n: int) -> list[float]:
 
 **Why this matters for learning:** The discrete milestone reward {-1, 1, 2, 3} provides clear threshold-based signal that is robust to timing noise on A100. The gap between levels (especially -1 to +1, which gates on correctness) creates strong learning signal. TRLOO post-processing is a drop-in fix that corrects the 25% gradient shrinkage without requiring a custom training loop.
 
-**Files:** `openenv_env/reward.py` (discrete milestone reward + TRLOO), `modal_app.py` (compile + verify + benchmark pipeline)
+**Files:** `openenv_env/reward.py` (discrete milestone reward + TRLOO), `eval_service/eval_core.py` (shared compile + verify + benchmark pipeline), `openenv_env/eval_backend.py` (backend switch), `modal_app.py` (fallback wrapper)
 
 ---
 
-## GRPO-10: Hybrid Eval (Local + Modal)
+## GRPO-10: Hybrid Eval (Local + Remote A100 Service)
 
 ### The Problem (Section 6.1, Risk 1.2)
 
-Every eval routes through Modal. If Modal is slow (>30s/call), each GRPO step takes 5+ min. All stages use Modal A100 for correctness+timing; H200 handles local compile pre-checks only.
+Every reward-bearing eval still depends on a remote A100 service. If the service is slow (>30s/call), each GRPO step can still become expensive. The current hackathon path therefore keeps H200 for local compile pre-checks and reserves remote A100 calls for correctness and timing.
 
-### The Fix: Local Cheap Eval for Early Turns, Modal for Final
+### The Fix: Local Cheap Eval for Early Turns, Remote Service for Final
 
 ```
-Turn 1: local nvcc -arch=sm_80 + 3-graph PAC verify      (~5 sec)
-Turn 2: local nvcc + PAC + basic cudaEvent timing          (~10 sec)
-Turn 3: batch Modal A100 + full ncu profiling              (~30-90 sec)
+Turn 1: local nvcc -arch=sm_80 syntax check                (~5 sec)
+Turn 2: local nvcc + lightweight validation                (~10 sec)
+Turn 3: remote A100 eval service + full correctness/timing (~30-90 sec)
 ```
 
-**Early stop:** If any turn yields r >= 2.0, stop the episode (no need for further turns or Modal eval).
+**Early stop:** If any turn yields r >= 2.0, stop the episode (no need for further remote evaluation).
 
 **Impact:**
-- Per-step time: 2-5 min → 30-60s for early turns (90% of steps exit before turn 3)
-- For 50 steps: ~50 min total eval time (vs ~4 hrs without hybrid)
-- Modal calls reduced by ~70% (only promising kernels get full profiling)
+- Per-step time drops because non-compiling kernels die locally before paying for A100 execution.
+- For pilot GRPO runs, most waste is removed from the rollout loop before remote dispatch.
+- Remote calls are reduced because only promising candidates hit the A100 service.
 
 **Feedback includes Nsight metrics (when available):**
 
@@ -1865,11 +1881,11 @@ def cheap_cuda_score(code: str) -> float:
     return score
 ```
 
-**Usage:** Generate G candidates. Score all cheaply. Only eval top candidates on Modal. Assign r=-1 to pruned candidates (they didn't even pass the structural filter). With G=2, prune the weaker one if its score is below threshold.
+**Usage:** Generate G candidates. Score all cheaply. Only eval top candidates on the remote backend. Assign r=-1 to pruned candidates (they didn't even pass the structural filter). With G=2, prune the weaker one if its score is below threshold.
 
 **Impact:**
-- 2-4x fewer Modal calls per step
-- For 50 trajectories in RFT: 200 → 50-100 Modal calls
+- 2-4x fewer remote eval calls per step
+- For 50 trajectories in RFT: 200 → 50-100 remote eval calls
 - Saves ~$1.50 and 25-75 min wall time
 - CPPO paper shows 7.98x speedup on GSM8K with 70-80% pruning, same or better accuracy
 
@@ -2067,7 +2083,7 @@ For each GRPO step:
   1. Generate: vLLM produces G=2 candidates with SKILL.md context
   2. Hybrid eval:
      - Local nvcc compile check (~5s)
-     - Modal A100 eval for compiling kernels (~30-90s)
+     - Remote A100 backend eval for compiling kernels (~30-90s)
      - Early stop if reward >= 3
   3. TRLOO: Leave-one-out advantage scaling N/(N-1)
   4. Standard clip loss (PPO-style ε=0.2)
@@ -2091,7 +2107,7 @@ STAGE 1 — WARM-UP (Qwen3-Coder-30B-A3B-Instruct on H200):
   Temperature: 1.0
   LR: 2e-6
   Action: Free-form generation (learn to compile first)
-  Eval: Hybrid (local turns 1-2, Modal turn 3)
+  Eval: Hybrid (local turns 1-2, remote A100 backend turn 3)
   Credit: TRLOO only (MARS DROPPED — see GRPO-4)
   Goal: Compilation rate 50% → 85%
 
@@ -2108,7 +2124,7 @@ STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H200) — HACKATHON CONF
   LR: 3e-6
   Context: 8,192 tokens (H200: ~107GB free — ample headroom)
   Action: Free-form generation with SKILL.md context (7 real A100 patterns via skill_builder.py)
-  Eval: Hybrid — local nvcc early turns, Modal A100 final turn
+  Eval: Hybrid — local nvcc early turns, remote A100 backend final turn
   Credit: TRLOO only (MARS DROPPED — see GRPO-4; CPPO DROPPED — see GRPO-11)
   Reward: Discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
   Loss: Standard clip (MASPO DEFERRED — see GRPO-12)
@@ -2122,7 +2138,7 @@ STAGE 3 — GRPO PILOT (Qwen3-Coder-30B-A3B-Instruct on H200) — HACKATHON CONF
 |------|-----|--------|---------|
 | `training/custom_grpo_trainer.py` | ~40 | **DONE** | TRLOOGRPOTrainer — N/(N-1) advantage scaling |
 | `openenv_env/reward.py` | ~60 | **DONE** | Discrete milestone {-1,1,2,3} + TRLOO post-process |
-| `training/multi_turn_rollout.py` | ~160 | **DONE** | Multi-turn rollout + local compile fast-path + Modal eval |
+| `training/multi_turn_rollout.py` | ~160 | **DONE** | Multi-turn rollout + local compile fast-path + backend-dispatched remote eval |
 | `openenv_env/skill_builder.py` update | ~100 | **DONE** | `_append_a100_patterns()` — 7 real expert patterns from doubleGraph |
 | `datasets/extract_doublegraph_a100.py` | ~550 | **DONE** | Harvest 192 A100 kernels → 3 TRL datasets |
 | `skydiscover_integration/evaluator.py` | ~190 | **DONE** | Cascade evaluator bridge (stage1→stage2) |
@@ -2193,7 +2209,7 @@ Why these projections are plausible (research basis):
 | 25x fewer RL samples than CUDA Agent | TRLOO correction + 192 expert demos. **SPECULATIVE -- depends on unimplemented components:** original 12-25x claim required MARS+CPPO (both DROPPED) | TRLOO alone: ~1.3x correction at G=2 |
 | No real A100 patterns in training data | 192 doubleGraph kernels + 7 SKILL.md patterns | Production code: 84K+ lines, 3.6× avg speedup |
 | Generic prompts (no topology awareness) | Topology-aware curriculum (5 graph tasks) | Power-law, dense-community, sparse-islands prompts |
-| No evolutionary search hedge | AdaEvolve multi-island UCB + EvoX strategies | 4 islands, 5 seed kernels, cascade eval on Modal A100 |
+| No evolutionary search hedge | AdaEvolve multi-island UCB + EvoX strategies | 4 islands, 5 seed kernels, cascade eval on the shared remote A100 backend |
 | G=4 zero-gradient steps | G=2 + discrete milestone {-1,1,2,3} | 4-level reward → usually non-zero std when compile rates differ |
 | Only 10 steps, 3 turns (demo) | 150 steps, 20 turns (match config) | Multi-turn = #1 CUDA-Agent ablation factor |
 | Single candidate per problem | Best-of-8 inference + AdaEvolve | pass@8 ≈ 99.99%; max speedup selection |
@@ -2217,7 +2233,7 @@ HACKATHON STAGE 3 — GRPO PILOT
   Temperature: 0.7
   LR: 3e-6
   Context: 8,192 tokens (H200: ~80GB free)
-  Eval: Hybrid — local nvcc early turns, Modal A100 final turn
+  Eval: Hybrid — local nvcc early turns, remote A100 backend final turn
   Credit: TRLOO only (default; set `KERNELFORGE_USE_TRLOO=0` to use vanilla GRPO) (MARS DROPPED — see GRPO-4)
   Reward: Discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
   Loss: Standard clip
@@ -2264,7 +2280,7 @@ FUTURE: STAGE 3 — GRPO + CURRICULUM (SCALE-UP TARGET)
   Temperature: 0.7
   LR: 5e-6
   Context: 32,768 tokens (B200: 92GB free - 40GB KV = 52GB headroom)
-  Eval: Hybrid — local nvcc turns 1-5, Modal A100 turns 6+
+  Eval: Hybrid — local nvcc turns 1-5, remote A100 backend turns 6+
   Credit: TRLOO leave-one-out N/(N-1) (MARS would require per-turn rewards — currently DROPPED)
   Reward: Discrete milestone {-1, 1, 2, 3} (future: consider continuous log(speedup) + Nsight bonus)
   CPPO: DROPPED for now (would require G>2 to be useful; re-evaluate if G increases)
@@ -2291,7 +2307,7 @@ With 20 turns and hybrid eval (CPPO DROPPED — no filtering savings):
 ```
 Per GRPO step (G=2, max_turns=20):
   Turn 1-5 per candidate: local nvcc compile check (~5s each) = 50s total
-  Turn 6-20 per candidate: Modal A100 eval (~30s each) = 15 turns × 2 × 30s = 900s
+  Turn 6-20 per candidate: remote A100 backend eval (~30s each) = 15 turns × 2 × 30s = 900s
   Average turns per candidate: ~12 (early exit at reward >= 3)
   Average wall-clock per step: ~6 minutes (no CPPO filtering)
 
@@ -2364,7 +2380,7 @@ HACKATHON CONFIG (PRIMARY — this weekend)
   Credit = TRLOO only (default; set `KERNELFORGE_USE_TRLOO=0` to use vanilla GRPO) (MARS DROPPED — see GRPO-4)
   Reward = discrete milestone {-1, 1, 2, 3} (CUDA Agent Equation 1)
   Loss = standard clip (MASPO DEFERRED — see GRPO-12)
-  Eval = Hybrid: local nvcc early turns, Modal A100 final turn
+  Eval = Hybrid: local nvcc early turns, remote A100 backend final turn
   Pruning = CPPO DROPPED (see GRPO-11)
   Inference = Best-of-N per problem + SkyDiscover hedge
 

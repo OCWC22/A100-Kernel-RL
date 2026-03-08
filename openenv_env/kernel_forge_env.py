@@ -33,9 +33,8 @@ class KernelForgeEnv(Environment):
     Context: 128K tokens
     """
 
-    def __init__(self, modal_function_name: str | None = None):
+    def __init__(self):
         super().__init__()
-        self.modal_fn = modal_function_name or os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
         self.target_gpu = os.getenv("KERNELFORGE_TARGET_GPU", "a100").lower()
         self.gpu_spec = get_gpu_spec(self.target_gpu)
         self.history = []               # Time-travel snapshots (DoubleAI-inspired)
@@ -55,13 +54,18 @@ class KernelForgeEnv(Environment):
         )
         self._state = State(episode_id=str(uuid4()), step_count=0)
 
-    def reset(self) -> KernelForgeObservation:
+    def reset(
+        self,
+        seed: int | None = None,
+        episode_id: str | None = None,
+        **kwargs: Any,
+    ) -> KernelForgeObservation:
         """Reset environment. Profile baselines on first call."""
         self.history = []
         self.turn = 0
         self.best_reward = -1.0
         self.best_code = None
-        self._state = State(episode_id=str(uuid4()), step_count=0)
+        self._state = State(episode_id=episode_id or str(uuid4()), step_count=0)
 
         if (
             self.original_baseline_ms is None
@@ -88,7 +92,12 @@ class KernelForgeEnv(Environment):
             topology_type=self.current_task.get("topology"),
         )
 
-    def step(self, action: KernelForgeAction) -> KernelForgeObservation:
+    def step(
+        self,
+        action: KernelForgeAction,
+        timeout_s: float | None = None,
+        **kwargs: Any,
+    ) -> KernelForgeObservation:
         """Execute one environment step from CUDA source code action."""
         self.turn += 1
         self._state.step_count = self.turn
@@ -203,9 +212,6 @@ class KernelForgeEnv(Environment):
         self.current_task = None
 
     def _modal(self, fn_name, payload=None):
-        """Dispatch to configured Modal app."""
-        import modal
-        fn = modal.Function.from_name(self.modal_fn, fn_name)
-        if payload is None:
-            return fn.remote()
-        return fn.remote(payload)
+        """Dispatch to configured eval backend (CoreWeave or Modal)."""
+        from openenv_env.eval_backend import dispatch_eval
+        return dispatch_eval(fn_name, payload)

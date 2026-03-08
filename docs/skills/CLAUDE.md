@@ -2,39 +2,36 @@
 
 ## Files
 
-| File | Lines | Content |
-|------|-------|---------|
-| `doublegraph_a100.md` | 325 | DoubleGraph engineering & replication guide for A100 |
+| File | Role |
+|------|------|
+| `CUDA_AGENT.md` | CUDA-Agent environment/task prior |
+| `DOUBLEGRAPH_A100.md` | DoubleGraph A100 kernel engineering prior |
+| `SKYDISCOVER_ADAEVOLVE_EVOX.md` | AdaEvolve/EvoX search-system prior |
+| `KERNELGYM_DR_KERNEL.md` | KernelGYM backend architecture and Dr. Kernel/TRLOO framing |
 
-## doublegraph_a100.md Section Index
+## Recommended Reading Order
 
-| Line | Section |
-|------|---------|
-| 1 | Title & Overview |
-| 11 | 1. Problem Statement: Cost of Genericism |
-| 30 | 2. System Architecture: 4-Layer Drop-in |
-| 47 | 3. Layer 1: Graph Abstraction (`compact_graph_t`) |
-| 75 | 4. Layer 2: Resource Management (`CachePool`) |
-| 106 | 5. Layer 3: 4-Way Dispatch Execution Matrix |
-| 148 | 6. Layer 4: A100-Specific Kernel Deep Dive |
-| 161 | 6.1 BFS: Dual-Frontier & Direction Optimization |
-| 165 | 6.2 Louvain: 3-Tier Adaptive Dispatch |
-| 177 | 6.3 PageRank: Fused SpMV & Warp-Level Reduction |
-| 187 | 6.4 WCC: Parallel Union-Find & Host-Mapped Flags |
-| 205 | 6.5 Triangle Count: DAG Orientation |
-| 214 | 7. Cross-Architecture Divergence (A100 vs L4 vs A10G) |
-| 224 | 8. Integration Layer & Build Pipeline |
-| 249 | 9. Hard Constraints & Known Limitations |
-| 292 | 10. Porting to Future Hardware (H100, B200) |
-| 318 | 11. Transferable Engineering Strategies |
+1. **`CUDA_AGENT.md`**
+   - understand the operator-task and evaluator framing
+2. **`DOUBLEGRAPH_A100.md`**
+   - understand A100-specific kernel engineering priors
+3. **`KERNELGYM_DR_KERNEL.md`**
+   - understand the lightweight OpenEnv wrapper over a KernelGYM-style backend
+4. **`SKYDISCOVER_ADAEVOLVE_EVOX.md`**
+   - understand the search hedge beyond the GRPO loop
 
-## When to Read
+## Current Repo Stance
 
-- **Graph kernel implementation** → Sec 6 (line 148)
-- **Baseline timing data** → Sec 6 subsections (timing per algorithm)
-- **Porting to H100/B200** → Sec 10 (line 292)
-- **Build pipeline** → Sec 8 (line 224)
+These skill docs support the current KernelForge architecture:
 
-## Also See
+- custom lightweight OpenEnv wrapper for the environment surface
+- shared KernelForge task/reward/rollout logic
+- KernelGYM-style backend beneath that wrapper
+- CoreWeave/Northflank as the primary eval path
+- Modal as fallback only
 
-- `/skill_a100.md` (root, 72 lines) — A100 hardware quick-reference
+External references:
+- [OpenEnv overview](https://meta-pytorch.github.io/OpenEnv/)
+- [TRL OpenEnv integration](https://huggingface.co/docs/trl/en/openenv)
+- [KernelGYM repo](https://github.com/hkust-nlp/KernelGYM)
+- [Dr. Kernel paper](https://arxiv.org/abs/2602.05885)

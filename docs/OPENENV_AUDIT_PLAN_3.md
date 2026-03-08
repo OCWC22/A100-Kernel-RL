@@ -4,6 +4,7 @@
 >
 > **Repo**: `A100-Kernel-RL/` — CUDA kernel optimization via RL on A100 GPUs.
 > **Status**: All patches applied. **114 tests pass.** `uv run pytest tests/ -q`
+> **Infra migration note (March 7, 2026):** The active deployment target is now Northflank + CoreWeave. Current Modal-specific code paths in the repo should be treated as legacy transition code until the teammate-owned backend migration lands. Sources: [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank).
 
 ---
 
@@ -12,9 +13,9 @@
 KernelForge trains an LLM (Qwen3-Coder-30B-A3B) to write optimized CUDA kernels using GRPO (Group Relative Policy Optimization). The system has two paths:
 
 1. **Judge/Demo path**: An OpenEnv HTTP server where external users submit CUDA kernels and get compile/correctness/speedup feedback
-2. **Training path**: A TRL GRPOTrainer that generates CUDA code, evaluates it on remote A100 GPUs via Modal, and uses discrete rewards {-1, 1, 2, 3} to improve the policy
+2. **Training path**: A TRL GRPOTrainer that generates CUDA code, evaluates it on remote A100 GPUs through the shared backend adapter, and uses discrete rewards {-1, 1, 2, 3} to improve the policy
 
-Both paths share the same reward logic (`reward.py`) and Modal evaluation backend (`task_support.py`).
+Both paths share the same reward logic (`reward.py`) and the same evaluator contract through `training/task_support.py` plus `openenv_env/eval_backend.py`. The actual compile / verify / benchmark implementation now lives in `eval_service/eval_core.py`, which is reused by the Northflank/CoreWeave FastAPI service and the Modal fallback wrapper. Sources: [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank).
 
 ### System Topology
 ```
@@ -34,17 +35,18 @@ KernelForgeEnv.step()                             │
          │                                        │
          ├────────────────────────────────────────┘
          ▼
-   SHARED CORE LOGIC
-   ├── task_support.py  (Modal dispatch, task routing)
-   ├── reward.py        (compute_reward: discrete {-1,1,2,3})
-   ├── anti_hack.py     (forbidden symbol scan)
-   └── skill_builder.py (SKILL.md generation)
-         │
-         ▼
-   Modal A100 Backend (modal_app.py)
-   ├── evaluate_kernel()       (WCC graph tasks)
-   ├── evaluate_ops6k_kernel() (Ops-6K dense tasks)
-   └── profile_baselines()     (baseline timing)
+  SHARED CORE LOGIC
+  ├── task_support.py   (task routing, payload shaping, reward contract)
+  ├── eval_backend.py   (CoreWeave HTTP default, Modal fallback)
+  ├── reward.py         (compute_reward: discrete {-1,1,2,3})
+  ├── anti_hack.py      (forbidden symbol scan)
+  └── skill_builder.py  (SKILL.md generation)
+        │
+        ▼
+  Remote A100 Backend
+  ├── eval_service/eval_core.py   (shared pure evaluator core)
+  ├── eval_service/app.py         (Northflank/CoreWeave FastAPI service)
+  └── modal_app.py                (legacy/fallback wrapper around eval_core)
 ```
 
 ---
@@ -57,8 +59,8 @@ KernelForgeEnv.step()                             │
 |---|---------|------|----------|--------|
 | 1 | No `models.py` — Action/Observation defined inline, not in canonical OpenEnv location | `openenv_env/kernel_forge_env.py` | High | **FIXED** |
 | 2 | `class KernelForgeEnv(Environment[A,O,S])` used generic subscript — echo_env reference does NOT | `openenv_env/kernel_forge_env.py` | Medium | **FIXED** |
-| 3 | `reset(seed, episode_id, **kw)` — OpenEnv contract: `reset()` takes NO args | `openenv_env/kernel_forge_env.py` | High | **FIXED** |
-| 4 | `step(action, timeout_s, **kw)` — OpenEnv contract: `step(action)` only | `openenv_env/kernel_forge_env.py` | High | **FIXED** |
+| 3 | `reset(seed, episode_id, **kw)` diverged from the minimal reset surface we standardized for the hackathon path; current OpenEnv docs also permit optional reset kwargs, so the fix was to simplify the environment signature rather than treat kwargs as universally forbidden | `openenv_env/kernel_forge_env.py` | High | **FIXED** |
+| 4 | `step(action, timeout_s, **kw)` — the canonical action path is `step(action)`; transport/runtime extras should not be carried as ad hoc step parameters | `openenv_env/kernel_forge_env.py` | High | **FIXED** |
 | 5 | `app = create_fastapi_app(...)` inline at module bottom — should be in `server/app.py` | `openenv_env/kernel_forge_env.py` | High | **FIXED** |
 | 6 | No `openenv.yaml` manifest | repo root | High | **FIXED** |
 | 7 | No `KernelForgeClient(EnvClient[...])` | missing file | Medium | **FIXED** |
@@ -101,7 +103,7 @@ class State(BaseModel):
 ```python
 class Environment:
     def __init__(self): ...
-    def reset(self) -> Observation: ...
+    def reset(self, seed=None, episode_id=None, **kwargs) -> Observation: ...
     def step(self, action: Action) -> Observation: ...
     @property
     def state(self) -> State: ...
@@ -190,7 +192,7 @@ class KernelForgeObservation(Observation):
 - **Imports**: `from openenv.core.env_server import Environment, create_fastapi_app` → `from openenv.core.env_server import Environment` + `from openenv_env.models import KernelForgeAction, KernelForgeObservation`
 - **Deleted inline class definitions**: `KernelForgeAction` and `KernelForgeObservation` moved to `models.py`. The import in this file brings them into the module namespace, so `from openenv_env.kernel_forge_env import KernelForgeAction` still works.
 - **Class declaration**: `KernelForgeEnv(Environment[KernelForgeAction, KernelForgeObservation, State])` → `KernelForgeEnv(Environment)` (echo_env reference does not use generic subscripts)
-- **Method signatures**: `reset(self, seed=None, episode_id=None, **kwargs)` → `reset(self)` and `step(self, action, timeout_s=None, **kwargs)` → `step(self, action: KernelForgeAction)`
+- **Method signatures**: `reset(self, seed=None, episode_id=None, **kwargs)` → `reset(self)` for the simplified hackathon surface, and `step(self, action, timeout_s=None, **kwargs)` → `step(self, action: KernelForgeAction)` so evaluation/runtime extras are not passed as ad hoc step parameters
 - **Deleted app creation**: `app = create_fastapi_app(...)` at bottom of file moved to `server/app.py`
 
 #### Patch 3: CREATED `openenv_env/server/__init__.py` + `openenv_env/server/app.py`
@@ -499,9 +501,9 @@ KERNELFORGE_USE_VLLM=0 KERNELFORGE_STAGE3_MAX_STEPS=1 \
 
 ### `training/task_support.py`
 ```python
-def evaluate_code_on_modal(cuda_code: str, task_row: dict, modal_app_name: str,
-                           baseline_orig_ms: float | None = None,
-                           baseline_dg_ms: float | None = None) -> dict
+def evaluate_code_remote(cuda_code: str, task_row: dict,
+                         baseline_orig_ms: float | None = None,
+                         baseline_dg_ms: float | None = None) -> dict
 def compute_task_reward(result: dict | None) -> float
 def normalize_eval_result(result: dict | None) -> dict
 def normalize_task_row(row: dict) -> dict
@@ -532,15 +534,69 @@ def trloo_post_process(advantages: list[float], n: int) -> list[float]
 
 ## Architectural Decisions (Do Not Change)
 
-1. **Training rollout talks directly to Modal** — NOT through the HTTP env server. This is intentional. The rollout needs multi-turn prompt management that step-level API doesn't handle.
+1. **Training rollout talks directly to the shared backend adapter** — NOT through the HTTP env server. This is intentional. The rollout needs multi-turn prompt management that step-level API doesn't handle.
 2. **Discrete rewards {-1, 1, 2, 3}** — per CUDA Agent ablation (96.8% vs 60.4% faster rate over continuous). Do not switch to continuous.
-3. **Local compile precheck** — `nvcc -arch=sm_80 -c` before Modal dispatch. Saves ~50% eval cost.
-4. **GPU split** — H200 for training, A100 (Modal) for ALL performance evaluation. Never use training GPU timing for reward.
+3. **Local compile precheck** — `nvcc -arch=sm_80 -c` before remote dispatch. Saves ~50% eval cost.
+4. **GPU split** — H200 for training, remote A100 for ALL performance evaluation. Never use training GPU timing for reward.
 5. **vLLM server mode** (not colocate) when enabled — training + vLLM + remote reward on one GPU is too many moving parts.
 6. **Import path**: `openenv.core.env_server` (NOT `.interfaces`). No `.interfaces` references exist in the codebase or mocks.
 7. **`client.py` blank subclass**: `EnvClient` base class handles serialization generically via Pydantic type params. The `pass` body is the documented pattern.
 
 ---
+
+## Current Hook Map and Remaining Architecture Holes
+
+OpenEnv and KernelGYM operate at different layers in this repo. KernelForge is building a **custom lightweight OpenEnv wrapper** as the standardized public environment contract: typed models, `step()` / `reset()` / `state()`, HTTP serving, and client packaging. KernelGYM is the execution-system reference underneath that wrapper: separate learning clients from GPU execution, serialize timing-sensitive work, isolate worker failures, and eventually scale through worker-style backend coordination. For KernelForge, the right architecture is therefore: **custom lightweight OpenEnv wrapper at the edge, KernelForge task/reward/rollout logic in the middle, KernelGYM-style backend underneath**. In the current codebase the primary backend target is Northflank + CoreWeave, with Modal retained as fallback only. Sources: [OpenEnv docs](https://meta-pytorch.github.io/OpenEnv/), [OpenEnv environment guide](https://github.com/meta-pytorch/OpenEnv/blob/main/envs/README.md), [TRL OpenEnv integration](https://huggingface.co/docs/trl/en/openenv), [Dr. Kernel / KernelGYM paper](https://arxiv.org/abs/2602.05885), [KernelGYM repo](https://github.com/hkust-nlp/KernelGYM), [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank).
+
+### Current hook map
+
+1. **OpenEnv surface**
+   - `openenv_env/models.py` defines the typed `KernelForgeAction` / `KernelForgeObservation` surface.
+   - `openenv_env/kernel_forge_env.py` implements the environment state machine.
+   - `openenv_env/server/app.py` and `openenv.yaml` expose the HTTP/server manifest.
+   - `openenv_env/client.py` provides the typed `EnvClient` wrapper.
+
+2. **KernelForge task/reward layer**
+   - `training/task_support.py` holds task routing, payload shaping, result normalization, and canonical reward computation.
+   - `training/multi_turn_rollout.py` owns multi-turn prompt refinement, local compile fast-fail, and reward collection for GRPO.
+   - `openenv_env/reward.py` and `training/custom_grpo_trainer.py` hold the shared reward and TRLOO logic.
+
+3. **Execution backend**
+   - `openenv_env/eval_backend.py` is now the provider-neutral dispatch seam.
+   - `eval_service/eval_core.py` is the shared evaluator implementation.
+   - `eval_service/app.py` is the primary Northflank/CoreWeave service, while `modal_app.py` is the fallback wrapper.
+
+### Remaining holes in the current gym/setup
+
+1. **The reward-bearing seam is improved but not fully neutralized.**
+   - The repo now has a real backend switch and a shared eval core, but `KernelForgeEnv` still imports payload / normalization helpers from `training/task_support.py` instead of a neutral runtime package.
+
+2. **Environment state and training state are still duplicated.**
+   - `KernelForgeEnv` tracks turn history and best reward.
+   - `multi_turn_rollout.py` separately tracks prompt refinement, baselines, feedback strings, and reward aggregation.
+
+3. **The environment layer depends on a training namespace.**
+   - `KernelForgeEnv.step()` imports execution helpers from `training/task_support.py`.
+   - This works today, but it is the wrong long-term dependency direction for an OpenEnv-facing environment.
+
+4. **The backend is service-shaped, not yet a full worker system.**
+   - `eval_service/app.py` gives the repo a clean remote service boundary, but not yet a full KernelGYM-style worker pool with subprocess-per-task isolation, queueing, and recovery orchestration.
+   - The next architectural step is stronger worker isolation, not a new environment API.
+
+5. **The live-evaluable subset is intentionally narrow.**
+   - The current supported routing is `wcc` plus the stateless `ops6k` subset.
+   - That is the correct hackathon slice, but it is not yet a full kernel gym task catalog.
+
+### Recommended hackathon stance
+
+- **Keep the custom lightweight OpenEnv wrapper at the edge.**
+  - Judges, demos, and TRL/OpenEnv integrations should continue to see `openenv_env/` as the official environment package, even though RL/GRPO may call the shared backend contract directly for efficiency.
+- **Refactor only the remaining training-namespace dependency next.**
+  - The adapter and shared eval core now exist; the next cleanup is to move payload/result helpers out of `training/task_support.py` so OpenEnv no longer depends on a training package.
+- **Keep direct training transport for now.**
+  - GRPO should keep using the shared adapter directly instead of paying an HTTP hop inside the inner loop.
+- **Adopt KernelGYM ideas selectively.**
+  - Add subprocess isolation and worker-style backend structure first; defer Redis-style full distributed orchestration until after benchmark validation.
 
 ## Post-Review Corrections
 

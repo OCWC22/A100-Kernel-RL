@@ -2,7 +2,7 @@
 Multi-turn rollout for GRPOTrainer.
 
 The policy generates on the training GPU, while correctness and runtime reward
-are computed remotely on the target A100 Modal backend.
+are computed remotely on the target A100 via CoreWeave/Northflank (or Modal).
 """
 
 from __future__ import annotations
@@ -21,12 +21,10 @@ from training.task_support import (
     build_generation_prompt,
     build_prompt_lookup,
     compute_task_reward,
-    evaluate_code_on_modal,
+    evaluate_code_remote,
     normalize_eval_result,
     normalize_task_row,
 )
-
-MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
 LOCAL_COMPILE_CHECK = os.getenv("KERNELFORGE_LOCAL_COMPILE", "1") == "1"
 TARGET_CUDA_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
 MAX_FEEDBACK_CHARS = int(os.getenv("KERNELFORGE_MAX_FEEDBACK_CHARS", "1200"))
@@ -149,14 +147,13 @@ _baselines_cache: dict[str, Any] | None = None
 
 
 def _get_baselines() -> tuple[float | None, float | None]:
-    """Fetch baseline timings from Modal (cached across calls)."""
+    """Fetch baseline timings from eval backend (cached across calls)."""
     global _baselines_cache
     if _baselines_cache is None:
         try:
-            import modal
+            from openenv_env.eval_backend import dispatch_eval
 
-            fn = modal.Function.from_name(MODAL_APP_NAME, "profile_baselines")
-            _baselines_cache = fn.remote() or {}
+            _baselines_cache = dispatch_eval("profile_baselines") or {}
         except Exception as exc:
             print(f"Baseline profiling failed: {exc}")
             _baselines_cache = {}
@@ -233,16 +230,15 @@ def make_multi_turn_rollout(
                         }
                     else:
                         try:
-                            result = evaluate_code_on_modal(
+                            result = evaluate_code_remote(
                                 code,
                                 task_row,
-                                modal_app_name=MODAL_APP_NAME,
                                 baseline_orig_ms=baseline_orig,
                                 baseline_dg_ms=baseline_dg,
                             )
                             reward = float(result.get("reward", _compute_reward_from_result(result)))
                         except Exception as exc:
-                            print(f"  [Turn {turn + 1}] Modal eval failed: {exc}")
+                            print(f"  [Turn {turn + 1}] Eval dispatch failed: {exc}")
                             reward = -1.0
                             result = {"compiles": False, "correct": False, "error": str(exc)[:200]}
 

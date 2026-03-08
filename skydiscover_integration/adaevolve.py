@@ -8,7 +8,7 @@ Implements the AdaEvolve algorithm from SkyDiscover:
 
 Uses the existing KernelForgeEvaluator bridge for evaluation:
   Stage 1: local nvcc compile check (fast, free)
-  Stage 2: Modal A100 benchmark (slow, ~$0.001/eval)
+  Stage 2: configured remote A100 benchmark (slow, backend-dependent cost)
 """
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ class AdaEvolve:
     breakthrough (2x+ improvement), the candidate is broadcast to all islands.
 
     Usage:
-        evaluator = KernelForgeEvaluator(modal_app_name="kernelforge-a100")
+        evaluator = KernelForgeEvaluator()
         seeds = [open(f).read() for f in seed_files]
         evo = AdaEvolve(evaluator, seeds, n_islands=4, budget=100)
         results = evo.run()
@@ -207,7 +207,7 @@ class AdaEvolve:
                 strategy=island.strategy,
             )
 
-            # Evaluate: stage1 (local compile) → stage2 (Modal A100)
+            # Evaluate: stage1 (local compile) → stage2 (remote A100 backend)
             stage1 = self.evaluator.evaluate_stage1(child_code)
             if stage1.combined_score > 0:
                 stage2 = self.evaluator.evaluate_stage2(child_code)

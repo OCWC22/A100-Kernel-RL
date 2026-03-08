@@ -14,7 +14,8 @@ Pipeline stages:
     3. GRPO + curriculum  (training/stage3_grpo.py)
     4. Evaluation         (evaluation/compare_stages.py)
 
-All GPU work (compilation, verification, benchmarking, training) runs on Modal.
+Training runs locally through the Python entrypoints. Remote evaluation is selected by
+KERNELFORGE_EVAL_BACKEND (CoreWeave/Northflank by default, Modal fallback).
 """
 from __future__ import annotations
 
@@ -29,7 +30,9 @@ import time
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
+EVAL_BACKEND = os.getenv("KERNELFORGE_EVAL_BACKEND", "coreweave")
 MODAL_APP = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
+EVAL_URL = os.getenv("KERNELFORGE_EVAL_URL", "")
 
 COMBINED_PATH = os.getenv("KERNELFORGE_COMBINED_PATH", "datasets/combined_kernelforge.jsonl")
 
@@ -105,7 +108,12 @@ def _run_step(step: dict, dry_run: bool = False) -> bool:
 
 def run_pipeline(from_stage: int = 0, dry_run: bool = False, eval_only: bool = False):
     """Execute the full training pipeline."""
-    print(f"KernelForge Pipeline — {TARGET_GPU} ({TARGET_ARCH}) via Modal ({MODAL_APP})")
+    backend_label = (
+        f"coreweave ({EVAL_URL})" if EVAL_BACKEND == "coreweave" and EVAL_URL else EVAL_BACKEND
+    )
+    if EVAL_BACKEND == "modal":
+        backend_label = f"modal ({MODAL_APP})"
+    print(f"KernelForge Pipeline — {TARGET_GPU} ({TARGET_ARCH}) via {backend_label}")
     print(f"{'DRY RUN' if dry_run else 'LIVE RUN'}")
     print()
 

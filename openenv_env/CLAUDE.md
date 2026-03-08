@@ -2,14 +2,15 @@
 
 ## GPU Split
 
-> All performance reward (speedup, correctness) executes on **A100 via Modal**. **H100** ($3.95/hr) for training + local compile checks only.
+> All performance reward (speedup, correctness) executes on **A100 via CoreWeave (Northflank)**. Set `KERNELFORGE_EVAL_BACKEND=modal` to use Modal instead.
+> **H200** ($4.54/hr) for training + local compile checks only.
 > Judges call `step()` first — cache model on startup, warm CUDA context, pre-load tokenizer.
 
 ## OpenEnv Protocol
 
 - **NOT Gymnasium**. HTTP client-server protocol.
 - Install: `uv add "openenv-core[core]>=0.2.1"`
-- Server: FastAPI app created via `create_fastapi_app(KernelForgeEnv, ...)`
+- Server: FastAPI app created via `create_app(KernelForgeEnv, KernelForgeAction, KernelForgeObservation, env_name="kernelforge")` in `openenv_env/server/app.py`
 
 ## Upstream Dataset Contract (training -> env)
 
@@ -45,10 +46,11 @@ class KernelForgeObservation(Observation):
 
 ### Constructor
 ```python
-KernelForgeEnv(modal_function_name="kernelforge-a100")
+KernelForgeEnv()
 ```
 - `self.target_gpu` from env `KERNELFORGE_TARGET_GPU` (default "a100")
 - `self.max_turns = 200`
+- remote evaluation dispatch selected by `KERNELFORGE_EVAL_BACKEND` via `openenv_env/eval_backend.py`
 
 ### Contract
 ```python
@@ -56,12 +58,12 @@ def reset(self, seed=None, episode_id=None, **kwargs) -> KernelForgeObservation
 def step(self, action: KernelForgeAction, timeout_s=None, **kwargs) -> KernelForgeObservation
 ```
 
-`step()` dispatches to Modal: `evaluate_kernel` with `verify_graphs=5, warmup_iters=50, benchmark_runs=30`
+`step()` builds a task-specific payload via `training/task_support.py` and dispatches through `openenv_env/eval_backend.py` to the active backend. Default path: CoreWeave/Northflank HTTP service. Fallback path: Modal wrapper.
 
 ## Reward (`reward.py`)
 
 ```python
-def validate_eval_result(result: dict) -> dict  # Assert Modal keys, clamp NaN/inf, safe defaults
+def validate_eval_result(result: dict) -> dict  # Assert evaluator contract keys, clamp NaN/inf, safe defaults
 
 def compute_reward(compiled, correct, speedup_vs_eager, speedup_vs_compile,
                    occupancy=None, mem_coalescing=None, warp_efficiency=None) -> float

@@ -274,15 +274,14 @@ def compute_task_reward(result: dict[str, Any] | None) -> float:
     )
 
 
-def evaluate_code_on_modal(
+def evaluate_code_remote(
     cuda_code: str,
     task_row: dict[str, Any],
-    modal_app_name: str,
     baseline_orig_ms: float | None = None,
     baseline_dg_ms: float | None = None,
 ) -> dict[str, Any]:
-    """Dispatch a candidate kernel to the correct Modal evaluator."""
-    import modal
+    """Dispatch a candidate kernel to the configured eval backend (CoreWeave or Modal)."""
+    from openenv_env.eval_backend import dispatch_eval
 
     fn_name, payload = build_modal_payload(
         cuda_code,
@@ -290,11 +289,26 @@ def evaluate_code_on_modal(
         baseline_orig_ms=baseline_orig_ms,
         baseline_dg_ms=baseline_dg_ms,
     )
-    fn = modal.Function.from_name(modal_app_name, fn_name)
-    result = normalize_eval_result(fn.remote(payload))
+    result = normalize_eval_result(dispatch_eval(fn_name, payload))
     result["reward"] = compute_task_reward(result)
     result["evaluation_backend"] = normalize_task_row(task_row)["evaluation_backend"]
     return result
+
+
+# Backward-compatible alias
+def evaluate_code_on_modal(
+    cuda_code: str,
+    task_row: dict[str, Any],
+    modal_app_name: str = "",
+    baseline_orig_ms: float | None = None,
+    baseline_dg_ms: float | None = None,
+) -> dict[str, Any]:
+    """Backward-compatible alias — dispatches via eval_backend (ignores modal_app_name)."""
+    return evaluate_code_remote(
+        cuda_code, task_row,
+        baseline_orig_ms=baseline_orig_ms,
+        baseline_dg_ms=baseline_dg_ms,
+    )
 
 
 def summarize_tasks(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:

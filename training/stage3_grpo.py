@@ -2,7 +2,7 @@
 Stage 3: GRPO with Curriculum — hackathon pilot (50 steps).
 
 GPU split: H200 handles model weights + generation + gradient updates.
-           A100 (Modal) handles all performance reward (speedup, correctness).
+           A100 (CoreWeave via Northflank) handles all performance reward.
            You cannot optimize A100 performance by measuring on H200.
 
 Multi-turn agentic training via TRL's rollout_func:
@@ -13,7 +13,7 @@ Multi-turn agentic training via TRL's rollout_func:
   - 50 max_steps (hackathon pilot — only if Gate G-0.8 passes)
   - G=2 (reduced from 4 — fewer zero-gradient steps)
   - H200: local nvcc compile check (fast-fail syntax errors)
-  - A100 (Modal): execution correctness + speedup timing for reward
+  - A100 (CoreWeave/Northflank): execution correctness + speedup timing for reward
   - Discrete reward {-1, 1, 2, 3} per CUDA Agent ablation
   - vLLM disabled by default for hackathon bring-up (`KERNELFORGE_USE_VLLM=0`)
 
@@ -44,7 +44,7 @@ from training.task_support import normalize_task_row
 
 TARGET_GPU = os.getenv("KERNELFORGE_TARGET_GPU", "A100")
 TARGET_ARCH = os.getenv("KERNELFORGE_TARGET_ARCH", "sm_80")
-MODAL_APP_NAME = os.getenv("KERNELFORGE_MODAL_APP", "kernelforge-a100")
+EVAL_BACKEND = os.getenv("KERNELFORGE_EVAL_BACKEND", "coreweave")
 STAGE2_OUTPUT = os.getenv("KERNELFORGE_STAGE2_OUTPUT", "outputs/kernelforge-stage2")
 STAGE1_OUTPUT = os.getenv("KERNELFORGE_STAGE1_OUTPUT", "outputs/kernelforge-stage1")
 OUTPUT_DIR = os.getenv("KERNELFORGE_STAGE3_OUTPUT", "outputs/kernelforge-stage3")

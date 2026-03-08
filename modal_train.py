@@ -40,6 +40,7 @@ train_image = (
         "bitsandbytes>=0.45",
         "openenv-core[core]>=0.2.1",
         "numpy>=1.26",
+        "httpx>=0.27",
         "vllm>=0.10.2",
         "modal>=0.70",
     )
@@ -85,6 +86,9 @@ def train(stage: int = 1, max_steps: int | None = None, dry_run: bool = False):
     print(f"GPU: {torch.cuda.get_device_name(0)}")
     print(f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1e9:.1f} GB")
     print(f"CUDA: {torch.version.cuda}")
+
+    os.environ.setdefault("KERNELFORGE_EVAL_BACKEND", "modal")
+    os.environ.setdefault("KERNELFORGE_MODAL_APP", EVAL_APP_NAME)
 
     if stage == 0:
         smoke = _smoke_test()
@@ -201,20 +205,25 @@ def _smoke_test() -> dict:
         print(f"  FAILED: {e}")
 
     # Test 4: Eval connectivity
-    print("\n[4/4] Testing Modal eval endpoint...")
+    print("\n[4/4] Testing configured eval backend...")
     try:
-        eval_fn = modal.Function.from_name(EVAL_APP_NAME, "evaluate_ops6k_kernel")
-        test_result = eval_fn.remote({
-            "cuda_code": '#include <torch/extension.h>\n\ntorch::Tensor run_kernel(torch::Tensor x) {\n    return x * 2;\n}\n\nPYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n    m.def("run_kernel", &run_kernel);\n}',
-            "task_code": 'import torch\nclass Model(torch.nn.Module):\n  def __init__(self): super().__init__()\n  def forward(self, x): return x * 2\ndef get_inputs(): return [torch.randn(256, device="cuda")]\ndef get_init_inputs(): return []',
-        })
+        from openenv_env.eval_backend import EVAL_BACKEND, dispatch_eval
+
+        test_result = dispatch_eval(
+            "evaluate_ops6k_kernel",
+            {
+                "cuda_code": '#include <torch/extension.h>\n\ntorch::Tensor run_kernel(torch::Tensor x) {\n    return x * 2;\n}\n\nPYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {\n    m.def("run_kernel", &run_kernel);\n}',
+                "task_code": 'import torch\nclass Model(torch.nn.Module):\n  def __init__(self): super().__init__()\n  def forward(self, x): return x * 2\ndef get_inputs(): return [torch.randn(256, device="cuda")]\ndef get_init_inputs(): return []',
+            },
+        )
         results["eval"] = {
             "connected": True,
             "compiles": test_result.get("compiles", False),
             "correct": test_result.get("correct", False),
+            "backend": EVAL_BACKEND,
         }
         print(
-            f"  Eval endpoint ({EVAL_APP_NAME}): compiles={test_result.get('compiles')} "
+            f"  Eval backend ({EVAL_BACKEND}): compiles={test_result.get('compiles')} "
             f"correct={test_result.get('correct')}"
         )
     except Exception as e:
