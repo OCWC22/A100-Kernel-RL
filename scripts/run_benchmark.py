@@ -68,8 +68,17 @@ def run_benchmark(
     output_path: str | None = None,
     baselines_only: bool = False,
     max_tasks: int | None = None,
+    quant_bits: int = 0,
+    benchmark: str = "all",
 ):
-    """Run the benchmark and output results."""
+    """Run the benchmark and output results.
+
+    Args:
+        benchmark: Filter tasks by evaluation_backend. Options:
+            "all" — run all evaluable tasks (default)
+            "ops6k" — CUDA Agent Ops-6K tasks only
+            "wcc" — Dr. Kernel WCC graph kernels only
+    """
     from openenv_env.task_pool import TaskPool
     from training.task_support import normalize_task_row
 
@@ -77,6 +86,16 @@ def run_benchmark(
     print(f"Loaded task pool: {pool.summary()}")
 
     tasks = pool.tasks
+
+    # Filter by benchmark suite
+    if benchmark != "all":
+        tasks = [t for t in tasks if t.get("evaluation_backend") == benchmark]
+        print(f"Filtered to benchmark={benchmark}: {len(tasks)} tasks")
+    else:
+        # Exclude unsupported tasks (no evaluator)
+        tasks = [t for t in tasks if t.get("evaluation_backend", "unsupported") != "unsupported"]
+        print(f"Using all evaluable tasks: {len(tasks)} tasks")
+
     if max_tasks:
         tasks = tasks[:max_tasks]
 
@@ -117,7 +136,7 @@ def run_benchmark(
 
         # Generate CUDA code using the model
         try:
-            cuda_code = _generate_kernel(task, model_name)
+            cuda_code = _generate_kernel(task, model_name, quant_bits=quant_bits)
         except Exception as exc:
             print(f"  GENERATION FAILED: {exc}")
             results.append({
@@ -192,6 +211,7 @@ def run_benchmark(
     output = {
         "model": model_name or "none",
         "pool_path": str(pool_path or "default"),
+        "benchmark": benchmark,
         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "metrics": metrics,
         "results": results,
@@ -219,7 +239,7 @@ def run_benchmark(
     return output
 
 
-def _generate_kernel(task: dict, model_name: str) -> str:
+def _generate_kernel(task: dict, model_name: str, quant_bits: int = 0) -> str:
     """Generate a CUDA kernel for a task using the specified model.
 
     This is a placeholder — in production, this calls the model via
@@ -239,11 +259,20 @@ def _generate_kernel(task: dict, model_name: str) -> str:
         import torch
 
         tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+        load_kwargs: dict = {
+            "torch_dtype": torch.bfloat16,
+            "device_map": "auto",
+            "trust_remote_code": True,
+        }
+        if quant_bits in (4, 8):
+            from training.model_loader import _make_bnb_config
+            bnb_config = _make_bnb_config(quant_bits)
+            if bnb_config is not None:
+                load_kwargs["quantization_config"] = bnb_config
+
         model = AutoModelForCausalLM.from_pretrained(
             model_name,
-            torch_dtype=torch.bfloat16,
-            device_map="auto",
-            trust_remote_code=True,
+            **load_kwargs,
         )
 
         messages = [{"role": "user", "content": prompt}]
@@ -286,6 +315,10 @@ def main():
     parser.add_argument("--output", type=str, default="results/benchmark.json")
     parser.add_argument("--baselines-only", action="store_true")
     parser.add_argument("--max-tasks", type=int, default=None)
+    parser.add_argument("--quant-bits", type=int, default=0, choices=[0, 4, 8],
+                        help="Quantization bits: 0=bf16, 4=NF4, 8=INT8 (recommended)")
+    parser.add_argument("--benchmark", type=str, default="all", choices=["all", "ops6k", "wcc"],
+                        help="Benchmark suite: all, ops6k (CUDA Agent), wcc (Dr. Kernel)")
     args = parser.parse_args()
 
     run_benchmark(
@@ -294,6 +327,8 @@ def main():
         output_path=args.output,
         baselines_only=args.baselines_only,
         max_tasks=args.max_tasks,
+        quant_bits=args.quant_bits,
+        benchmark=args.benchmark,
     )
 
 
