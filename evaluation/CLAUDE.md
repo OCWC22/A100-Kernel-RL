@@ -113,8 +113,9 @@ Returns: `compiles`, `correct`, `speedup_vs_orig`, `speedup_vs_dg`, `runtime_ms`
 | Local nvcc compile fast-path | **DONE** | `training/multi_turn_rollout.py:_local_compile_check()` |
 | Remote eval (WCC) | **DONE in code** | `eval_service/eval_core.py:evaluate_kernel_impl()` via `eval_backend` |
 | Remote eval (Ops-6K) | **DONE in code** | `eval_service/eval_core.py:evaluate_ops6k_kernel_impl()` via `eval_backend` |
-| Nsight bonus in reward | **DONE** | `openenv_env/reward.py:compute_reward()` |
-| CPPO cheap_cuda_score pre-filter | NOT YET | GRPO-11 line 1762 |
+| Nsight bonus in reward | **API COMPAT** | `openenv_env/reward.py:compute_reward()` — accepted but unused in discrete mode |
+| Anti-hack runtime checks | **DONE** | `openenv_env/anti_hack.py` (5 checks wired into `eval_core.py` lines 732-773) |
+| ~~CPPO cheap_cuda_score pre-filter~~ | DROPPED | At G=2, pruning leaves G=1 → zero advantage variance |
 | Full hybrid turn-escalation | NOT YET | GRPO-10 line 1355 |
 
 ## ~~CPPO Heuristic~~ — DROPPED
