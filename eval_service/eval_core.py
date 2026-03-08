@@ -696,6 +696,11 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
             return result
 
         try:
+            # Collect outputs for anti-hack checks (need 2+ distinct input sets)
+            anti_hack_candidate_outputs = []
+            anti_hack_ref_outputs = []
+            anti_hack_inputs = []
+
             for seed in range(5):
                 torch.manual_seed(42 + seed)
                 test_inputs = ref_mod.get_inputs()
@@ -711,12 +716,61 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
 
                 _assert_close(candidate_output, ref_output, torch)
 
+                # Stash first 2 for anti-hack checks
+                if seed < 2:
+                    anti_hack_candidate_outputs.append(_clone_value(candidate_output))
+                    anti_hack_ref_outputs.append(_clone_value(ref_output))
+                    anti_hack_inputs.append(_clone_value(test_inputs))
+
             result["correct"] = True
             result["verifier_msg"] = "Outputs matched reference for 5 random seeds"
         except Exception as exc:
             result["error"] = f"Correctness check failed: {str(exc)[:800]}"
             result["verifier_msg"] = result["error"]
             return result
+
+        # Anti-hack checks (Dr. Kernel-inspired)
+        try:
+            from openenv_env.anti_hack import (
+                check_not_passthrough,
+                check_output_not_constant,
+                check_shapes_match,
+            )
+
+            # Shape check
+            if anti_hack_ref_outputs:
+                passed, reason = check_shapes_match(
+                    anti_hack_candidate_outputs[0], anti_hack_ref_outputs[0]
+                )
+                if not passed:
+                    result["correct"] = False
+                    result["error"] = f"Anti-hack: {reason}"
+                    result["verifier_msg"] = result["error"]
+                    return result
+
+            # Constant output check
+            if len(anti_hack_candidate_outputs) >= 2:
+                passed, reason = check_output_not_constant(
+                    anti_hack_candidate_outputs[0], anti_hack_candidate_outputs[1]
+                )
+                if not passed:
+                    result["correct"] = False
+                    result["error"] = f"Anti-hack: {reason}"
+                    result["verifier_msg"] = result["error"]
+                    return result
+
+            # Passthrough check
+            if anti_hack_inputs:
+                passed, reason = check_not_passthrough(
+                    anti_hack_candidate_outputs[0], anti_hack_inputs[0]
+                )
+                if not passed:
+                    result["correct"] = False
+                    result["error"] = f"Anti-hack: {reason}"
+                    result["verifier_msg"] = result["error"]
+                    return result
+        except Exception:
+            pass  # Anti-hack is best-effort, don't fail the whole eval
 
         try:
             torch.manual_seed(42)
@@ -799,6 +853,20 @@ def evaluate_ops6k_kernel_impl(payload: dict) -> dict:
                 result["speedup_vs_orig"] = eager_ms / kernel_ms
             if compile_ms > 0 and kernel_ms > 0:
                 result["speedup_vs_dg"] = compile_ms / kernel_ms
+
+            # No-op check: if runtime is suspiciously fast, the kernel skips computation
+            try:
+                from openenv_env.anti_hack import check_not_noop
+
+                passed, reason = check_not_noop(kernel_ms)
+                if not passed:
+                    result["correct"] = False
+                    result["error"] = f"Anti-hack: {reason}"
+                    result["verifier_msg"] = result["error"]
+                    result["speedup_vs_orig"] = 0.0
+                    result["speedup_vs_dg"] = 0.0
+            except Exception:
+                pass
         except Exception as exc:
             result["error"] = f"Profiling failed: {str(exc)[:500]}"
 
