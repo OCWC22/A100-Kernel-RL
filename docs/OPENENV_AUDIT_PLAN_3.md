@@ -3,7 +3,7 @@
 > **Purpose**: Documents what was wrong, what was fixed and why, and what the codebase looks like now. Serves as a reference for engineers and judges evaluating the hackathon submission.
 >
 > **Repo**: `A100-Kernel-RL/` — CUDA kernel optimization via RL on A100 GPUs.
-> **Status**: All patches applied. **114 tests pass.** `uv run pytest tests/ -q`
+> **Status**: All patches applied. **9/9 test_env.py tests pass** (mock target updated `_modal` → `_dispatch`; baseline profiling test uses explicit WCC task). `uv run pytest tests/test_env.py -v`
 > **Infra migration note (March 7, 2026):** The active deployment target is now Northflank + CoreWeave. Current Modal-specific code paths in the repo should be treated as legacy transition code until the teammate-owned backend migration lands. Sources: [Northflank GPU workloads](https://northflank.com/docs/v1/application/gpu-workloads/gpus-on-northflank), [CoreWeave on Northflank](https://northflank.com/docs/v1/application/bring-your-own-cloud/coreweave-on-northflank).
 
 ---
@@ -39,7 +39,7 @@ KernelForgeEnv.step()                             │
   ├── task_support.py   (task routing, payload shaping, reward contract)
   ├── eval_backend.py   (CoreWeave HTTP default, Modal fallback)
   ├── reward.py         (compute_reward: discrete {-1,1,2,3})
-  ├── anti_hack.py      (forbidden symbol scan)
+  ├── anti_hack.py      (forbidden symbol scan + 5 runtime anti-hack checks)
   └── skill_builder.py  (SKILL.md generation)
         │
         ▼
@@ -615,3 +615,22 @@ Three real bugs were caught by teammate review and fixed in both this spec and t
 - **`build_generation_prompt` signature concern**: Verified exact match in `training/task_support.py`.
 - **Modal env var ordering**: `modal_train.py` sets env vars before stage imports, ordering is correct.
 - **`openenv-core[core]>=0.2.1` concern**: Matches `pyproject.toml` and `modal_train.py`.
+
+---
+
+## Environment Redesign (March 8, 2026)
+
+Major changes pushed after the original 17-bug audit:
+
+| Change | File | Impact |
+|--------|------|--------|
+| Task pool sampling on `reset()` | `openenv_env/task_pool.py` | Replace hardcoded WCC with pool sampling |
+| `max_turns=3` | `openenv_env/kernel_forge_env.py` | Dr. Kernel MAX_TURN=3 |
+| 5 anti-hack runtime checks | `openenv_env/anti_hack.py` | Wired into `eval_core.py:732-773` |
+| `_dispatch()` replaces `_modal()` | `openenv_env/kernel_forge_env.py` | Backend-neutral dispatch |
+| Dependency inversion fix | `openenv_env/task_routing.py` | Env no longer imports training/ |
+| Benchmark tooling | `scripts/run_benchmark.py` | KernelBench-compatible fast_p metrics |
+| Task pool builder | `tasks/build_task_pool.py` | Curate Ops-6K → pool JSONL |
+| test_env.py mock update | `tests/test_env.py` | `_modal` → `_dispatch` mock target |
+
+**Full environment documentation:** See `docs/KERNELFORGE_RL_ENVIRONMENT.md` and `docs/SYSTEM_TRUTH.md`.

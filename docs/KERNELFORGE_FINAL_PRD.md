@@ -238,7 +238,7 @@ Hackathon reward should be simple and defensible:
 reward = -1   # if not compiles or not correct
 reward = 1    # compiles and correct, but no speedup
 reward = 2    # faster than baseline
-reward = 3    # significant speedup (>2x or within 10% of expert)
+reward = 3    # correct and faster than torch.compile (speedup_vs_compile > 1.05)
 ```
 
 Optional structured bonus can be added only if actually implemented and tested:
@@ -328,14 +328,22 @@ A100-Kernel-RL/
 │   ├── models.py                   # KernelForgeAction, KernelForgeObservation (Pydantic)
 │   ├── client.py                   # KernelForgeClient(EnvClient)
 │   ├── reward.py                   # Discrete milestone reward {-1, 1, 2, 3}
-│   ├── anti_hack.py                # Forbidden symbol scanning + CU_FLAGS whitelist
+│   ├── anti_hack.py                # Forbidden symbol scan + 5 runtime anti-hack checks (Dr. Kernel)
 │   ├── gpu_registry.py             # A100/H100/H200/B200 specs
 │   ├── skill_builder.py            # Dynamic SKILL.md from GPU registry
+│   ├── task_pool.py                # TaskPool: load, sample, cache baselines
+│   ├── task_routing.py             # Re-exports from training/task_support.py
+│   ├── eval_backend.py             # CoreWeave HTTP + Modal dispatch
 │   ├── cache_pool.py               # LRU GPU cache
 │   └── server/
 │       └── app.py                  # create_app(KernelForgeEnv, ...) → FastAPI on port 8000
 │
-├── evaluation/                     # Eval, verification & profiling
+├── eval_service/                   # Remote A100 evaluation (CoreWeave/Northflank)
+│   ├── eval_core.py                # Shared pure evaluator: WCC + Ops-6K paths (873 lines)
+│   ├── app.py                      # FastAPI endpoints for Northflank/CoreWeave
+│   └── Dockerfile                  # GPU deployment container
+│
+├── evaluation/                     # Offline eval, verification & profiling
 │   ├── eval_model.py               # evaluate_checkpoint(), evaluate_multi_seed()
 │   ├── compare_stages.py           # Base vs Stage 1-3 progression
 │   ├── ablation.py                 # Ablation study harness
@@ -361,7 +369,7 @@ A100-Kernel-RL/
 │
 ├── datasets/                       # Training data
 │   ├── build_combined_dataset.py   # Unified builder: manifest + Ops-6K → JSONL
-│   ├── combined_kernelforge.jsonl  # ~6,192 rows
+│   ├── combined_kernelforge.jsonl  # 224 rows (192 doubleGraph + 32 ops)
 │   ├── doublegraph_sft.jsonl       # 192 SFT entries
 │   └── extract_doublegraph_a100.py # Harvester + constants
 │
@@ -371,7 +379,14 @@ A100-Kernel-RL/
 │   ├── evox_strategies.py          # Self-evolving mutation strategies
 │   └── initial_kernels/            # 5 seed A100 graph kernels
 │
-├── tests/                          # 114 tests (12 files)
+├── tasks/                          # Task pool curation
+│   └── build_task_pool.py          # Curate Ops-6K → pool_v0.jsonl
+│
+├── scripts/                       # Benchmark tooling
+│   ├── run_benchmark.py            # KernelBench-compatible fast_p metrics
+│   └── compare_results.py          # Before/after comparison
+│
+├── tests/                          # Tests (9 env + others)
 │   ├── conftest.py                 # Shared fixtures + Modal/GPU mocks
 │   ├── test_reward.py
 │   ├── test_reward_monitor.py
@@ -388,9 +403,24 @@ A100-Kernel-RL/
 
 ---
 
-## 8.5 Current Implementation Snapshot (March 6, 2026)
+## 8.5 Current Implementation Snapshot (March 8, 2026)
 
 This section is the **live status tracker** for what is actually implemented in the repo today. It is meant to keep the team aligned on what is done, what is partially done, and what is still blocking a real RL launch.
+
+### 8.5.0 Environment Redesign (March 8, 2026)
+
+| Change | File | What |
+|--------|------|------|
+| Task pool sampling on `reset()` | `openenv_env/task_pool.py` | Replace hardcoded WCC with pool sampling (Ops-6K + doubleGraph) |
+| `max_turns=3` | `openenv_env/kernel_forge_env.py` | Down from 200, matches Dr. Kernel MAX_TURN=3 |
+| Anti-hack runtime checks | `openenv_env/anti_hack.py` | 5 Dr. Kernel-inspired checks wired into eval_core.py |
+| Reference code in observations | `openenv_env/kernel_forge_env.py` | Task prompt + PyTorch reference code + interface contract |
+| `_dispatch()` replaces `_modal()` | `openenv_env/kernel_forge_env.py` | Backend-neutral dispatch via eval_backend.py |
+| Dependency inversion fix | `openenv_env/task_routing.py` | Re-exports from training/ so env doesn't import training |
+| Benchmark tooling | `scripts/run_benchmark.py`, `scripts/compare_results.py` | KernelBench-compatible fast_p metrics |
+| Task pool builder | `tasks/build_task_pool.py` | Curates Ops-6K from HuggingFace → stateless evaluable subset |
+
+**Single-source-of-truth for environment design:** See `docs/SYSTEM_TRUTH.md` and `docs/KERNELFORGE_RL_ENVIRONMENT.md`.
 
 ### 8.5.1 Launch-readiness status
 

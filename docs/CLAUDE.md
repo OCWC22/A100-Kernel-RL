@@ -11,6 +11,7 @@
 
 | File | Role |
 |------|------|
+| `KERNELFORGE_RL_ENVIRONMENT.md` | Complete RL environment system reference (environment + eval + training + search) |
 | `KERNELFORGE_FINAL_PRD.md` | Main source of truth for architecture, rollout order, and launch criteria |
 | `GRPO_DEEP_DIVE.md` | RL math, rollout strategy, TRLOO framing, and implementation guidance |
 | `OPENENV_AUDIT_PLAN_3.md` | OpenEnv contract record plus architecture audit |
@@ -129,6 +130,7 @@ Recent changes to the environment layer:
 ## Quick File Pointers
 
 - **Single source of truth**: `docs/SYSTEM_TRUTH.md`
+- **Complete system reference**: `docs/KERNELFORGE_RL_ENVIRONMENT.md`
 - OpenEnv server: `openenv_env/server/app.py`
 - OpenEnv client: `openenv_env/client.py`
 - Environment: `openenv_env/kernel_forge_env.py`

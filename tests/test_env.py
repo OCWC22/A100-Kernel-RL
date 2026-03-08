@@ -8,7 +8,7 @@ from openenv_env import KernelForgeEnv, KernelForgeAction, KernelForgeObservatio
 @pytest.fixture
 def env():
     """Create env with mocked Modal backend."""
-    with patch("openenv_env.kernel_forge_env.KernelForgeEnv._modal") as mock_modal:
+    with patch("openenv_env.kernel_forge_env.KernelForgeEnv._dispatch") as mock_modal:
         mock_modal.return_value = {"original_ms": 10.0, "doublegraph_ms": 8.0}
         e = KernelForgeEnv()
         yield e, mock_modal
@@ -25,6 +25,13 @@ def test_reset_returns_observation(env):
 
 def test_reset_profiles_baselines(env):
     e, mock_modal = env
+    # Force WCC task — baseline profiling only runs for WCC evaluation backend
+    from openenv_env.task_pool import TaskPool
+    e.task_pool = TaskPool([{
+        "task_id": "test_wcc",
+        "prompt": "WCC task",
+        "ops": ["wcc"],
+    }])
     e.reset()
     assert e.original_baseline_ms == 10.0
     assert e.doublegraph_baseline_ms == 8.0
@@ -80,7 +87,8 @@ def test_step_correct_kernel(env):
 def test_step_fast_kernel(env):
     e, mock_modal = env
     e.reset()
-    # Clear doublegraph baseline so only eager comparison applies
+    # Set eager baseline explicitly and clear doublegraph so only eager comparison applies
+    e.original_baseline_ms = 10.0
     e.doublegraph_baseline_ms = None
 
     mock_modal.return_value = {

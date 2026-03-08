@@ -164,7 +164,7 @@ TRLOO multiplier = 4/3 ≈ 1.333
 Advantages become: [-0.20, +1.36, -1.76, +0.59] → much stronger signal for the good kernel, stronger penalty for the bad one.
 ```
 
-In code (your reward_trloo_nsight.py):
+In code (actual implementation: `openenv_env/reward.py` + `training/custom_grpo_trainer.py`):
 ```python
 r_tensor = torch.tensor(rewards)  # shape (G,)
 N = len(rewards)
@@ -254,7 +254,7 @@ This is the **precise mathematics** behind the fix you are pasting tonight. Ever
 
 ### 1. Original GRPO (DeepSeekMath, arXiv [2402.03300](https://arxiv.org/abs/2402.03300))
 
-For each prompt (one PyTorch op + task_code), sample **G** completions (your G=4).  
+For each prompt (one PyTorch op + task_code), sample **G** completions (G=2 for hackathon; G=4 in original CUDA Agent).  
 Compute scalar reward **r_i** for each completion i (in your case: discrete milestone {-1, 1, 2, 3} from CUDA Agent Equation 1).
 
 **Advantage estimator** (outcome supervision variant used in kernel RL):
@@ -302,7 +302,7 @@ When you take **expectation** E[∇ log π (G_i - Ĝ)] and apply the score-funct
 E[ĝ_GRPO] = (1 - 1/N_t) ∇_θJ(θ)
 ```
 
-- With your G=4 → **25% smaller gradients every step**
+- With G=4 → 25% smaller gradients; with G=2 (hackathon) → **50% smaller gradients every step**
 - In multi-turn kernel generation: N_t shrinks (bad kernels die early) → bias gets **worse** in later turns (exactly why CUDA-Agent pure-RL collapsed at step 17).
 - High-return outliers are **self-penalized** (a 5× speedup kernel gets pulled down by its own inclusion in the mean).
 
@@ -338,7 +338,7 @@ G_{i,t} = Σ_{t'=t}^T R_{i,t'}    (γ=1)
 
 Then apply TRLOO on top of these G_{i,t}.
 
-~~This is exactly what your `cuda_kernel_reward` does~~ (MARS is DROPPED — see GRPO-4):
+Actual implementation is `compute_reward()` in `openenv_env/reward.py` (MARS is DROPPED — see GRPO-4):
 ```python
 # MARS step — NOT USED (outcome-only rewards make this a no-op)
 # r = log(speedup) + 0.3*occupancy + 0.2*coalescing  # OLD continuous reward
@@ -1421,6 +1421,7 @@ def multi_turn_hybrid_rollout(prompts, trainer):
                 turn_rewards.append(_compute_reward(result))
             else:
                 # Final turn: full Modal + Nsight eval
+                # NOTE: actual dispatch uses eval_backend.dispatch_eval() via _dispatch()
                 result = _modal_eval_nsight(cuda_code, task_code)
                 turn_rewards.append(_compute_reward_nsight(result))
 
